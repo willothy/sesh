@@ -1,0 +1,41 @@
+syntax = "proto3";
+package sesh;
+
+service Sesh {
+	rpc StartSession (SeshStartRequest) returns (SeshStartResponse);
+	rpc KillSession (SeshKillRequest) returns (SeshKillResponse);
+	rpc ListSessions (SeshListRequest) returns (SeshListResponse);
+}
+
+message SeshStartRequest {
+	string name = 1;
+	string program = 2;
+	repeated string args = 3;
+}
+
+message SeshStartResponse {
+	string socket = 1;
+}
+
+message SeshKillRequest {
+	oneof session {
+		string name = 1;
+		uint64 id = 2;
+	}
+}
+
+message SeshKillResponse {
+	bool success = 1;
+}
+
+message SeshListRequest {}
+
+message SeshInfo {
+	uint64 id = 1;
+	string name = 2;
+	string program = 3;
+}
+
+message SeshListResponse {
+	repeated SeshInfo sessions = 1;
+}
