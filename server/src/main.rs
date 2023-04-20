@@ -9,6 +9,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixListener,
+    signal::unix::{signal, SignalKind},
     sync::Mutex,
 };
 use tokio_stream::wrappers::UnixListenerStream;
@@ -46,30 +47,21 @@ impl Session {
         }
     }
 
+    #[inline(always)]
+    fn pid(&self) -> i32 {
+        self.pty.pid()
+    }
+
     async fn start(sock_path: PathBuf, fd: RawFd) -> Result<()> {
         let socket = UnixListener::bind(sock_path)?;
         let (stream, _addr) = socket.accept().await?;
 
         let (mut r_socket, mut w_socket) = stream.into_split();
 
-        // let w_socket = Arc::new(Mutex::new(w_socket));
-        // let r_socket = Arc::new(Mutex::new(r_socket));
-
         tokio::task::spawn({
-            // let pty = unsafe { File::from_raw_fd(fd) };
             let mut pty = unsafe { tokio::fs::File::from_raw_fd(fd) };
-            // let socket = w_socket.clone();
             async move {
                 loop {
-                    // let Ok(mut socket) = socket.try_lock() else {
-                    //     tokio::task::yield_now().await;
-                    //     continue;
-                    // };
-                    // let Ok(mut pty) = pty.try_lock() else {
-                    //     tokio::task::yield_now().await;
-                    //     continue;
-                    // };
-                    // let pty_file = pty; //pty.file();
                     let mut i_packet = [0; 4096];
 
                     let i_count = pty.read(&mut i_packet).await?;
@@ -87,23 +79,9 @@ impl Session {
             }
         });
         tokio::task::spawn({
-            // let pty = pty.clone();
             let mut pty = unsafe { tokio::fs::File::from_raw_fd(fd) };
-            // let socket = self.socket.clone();
-            // let socket = socket.clone();
             async move {
                 loop {
-                    // let mut socket = socket.lock().await.accept().await?.0;
-                    // let Ok(mut socket) = socket.try_lock() else {
-                    //     tokio::task::yield_now().await;
-                    //     continue;
-                    // };
-                    // let Ok(mut pty) = pty.try_lock() else {
-                    //     tokio::task::yield_now().await;
-                    //     continue;
-                    // };
-                    // let pty_file = pty.file();
-
                     let mut o_packet = [0; 4096];
 
                     let o_count = r_socket.read(&mut o_packet).await?;
@@ -120,21 +98,6 @@ impl Session {
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
-        // tokio::task::spawn({
-        //     let pty = self.pty.clone();
-        //     async move {
-        //         loop {
-        //             let pty = pty.lock().await;
-        //             tokio::signal::unix::signal(SignalKind::window_change())?
-        //                 .recv()
-        //                 .await;
-        //             pty.resize(&Size::term_size()?)
-        //                 .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        //         }
-        //         #[allow(unreachable_code)]
-        //         Result::<_, anyhow::Error>::Ok(())
-        //     }
-        // });
         Ok(())
     }
 }
@@ -149,10 +112,10 @@ impl Drop for Session {
 
 #[derive(Clone)]
 struct Sesh {
-    sessions: Arc<Mutex<HashMap<String, Session>>>,
     // do I need to queue events?
     // just uncomment the queue related things, it's working already though probably not optimal
     // queue: Arc<Mutex<VecDeque<Command>>>,
+    sessions: Arc<Mutex<HashMap<String, Session>>>,
 }
 
 #[tonic::async_trait]
@@ -205,14 +168,40 @@ impl RPCDefs for Sesh {
 
 impl Sesh {
     fn new() -> Result<Self> {
-        Ok(Self {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            // queue: Arc::new(Mutex::new(VecDeque::new())),
-        })
+        let sessions = Arc::new(Mutex::new(HashMap::<String, Session>::new()));
+        // Handle process exits
+        // TODO: Send exit signal to connected clients
+        tokio::task::spawn({
+            let sessions = sessions.clone();
+            async move {
+                let mut signal = signal(SignalKind::child())?;
+                loop {
+                    signal.recv().await;
+                    let mut sessions = sessions.lock().await;
+                    let mut to_remove = Vec::new();
+                    for (name, session) in sessions.iter() {
+                        let pid = session.pid();
+                        let mut status = 0;
+                        let res = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                        if res > 0 {
+                            println!("exiting: {}", name);
+                            to_remove.push(name.clone());
+                        }
+                    }
+                    for name in to_remove {
+                        sessions.remove(&name);
+                    }
+                }
+                #[allow(unreachable_code)]
+                Result::<_, anyhow::Error>::Ok(())
+            }
+        });
+        Ok(Self { sessions })
     }
 
     pub async fn exec(&self, cmd: Command) -> Result<CommandResponse> {
         println!("Executing command: {:?}", cmd);
+
         // let mut queue = loop {
         //     let Ok(queue) = self.queue.try_lock() else {
         //         tokio::task::yield_now().await;
@@ -246,13 +235,18 @@ impl Sesh {
                 let mut sessions = self.sessions.lock().await;
                 let nsessions = sessions.len();
 
-                // TODO: Find a better way to auto-name sessions
                 let name = PathBuf::from(&name)
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or(name.replace("/", "_"));
 
-                let sesh_name = format!("{}-{}", name, nsessions);
+                let mut sesh_name = format!("{}", name);
+                let mut i = 0;
+                while sessions.contains_key(&sesh_name) {
+                    sesh_name = format!("{}-{}", name, i);
+                    i += 1;
+                }
+
                 let sock_name = format!("/tmp/sesh/{}.sock", &sesh_name);
 
                 println!("Starting session: {} on {}", sesh_name, sock_name);

@@ -50,6 +50,10 @@ impl Pty {
             })
     }
 
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
     pub fn file(&mut self) -> &mut File {
         &mut self.file
     }
