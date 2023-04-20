@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
-    fs::File,
     io,
     os::unix::{
         io::{FromRawFd, RawFd},
@@ -10,6 +9,7 @@ use std::{
     ptr,
     time::Duration,
 };
+use tokio::fs::File;
 
 use crate::{error::CResult, term::Size};
 
@@ -52,6 +52,10 @@ impl Pty {
 
     pub fn file(&mut self) -> &mut File {
         &mut self.file
+    }
+
+    pub fn fd(&self) -> RawFd {
+        self.fd
     }
 
     /// Resizes the child pty.

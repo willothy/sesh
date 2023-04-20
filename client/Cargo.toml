@@ -20,3 +20,4 @@ sesh-shared = { path = "../shared" }
 sesh-proto = { path = "../proto" }
 clap = { version = "4.2.3", features = ["derive"] }
 serde = { version = "1.0.160", features = ["derive"] }
+ctrlc = "3.2.5"

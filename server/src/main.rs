@@ -1,7 +1,16 @@
 use anyhow::Result;
 use sesh_shared::{pty::Pty, term::Size};
-use std::{collections::HashMap, fs::File, path::PathBuf, sync::Arc};
-use tokio::{net::UnixListener, signal::unix::SignalKind, sync::Mutex};
+use std::{
+    collections::HashMap,
+    os::fd::{FromRawFd, RawFd},
+    path::PathBuf,
+    sync::Arc,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UnixListener,
+    sync::Mutex,
+};
 use tokio_stream::wrappers::UnixListenerStream;
 
 use tonic::{transport::Server as RPCServer, Request, Response, Status};
@@ -20,62 +29,114 @@ struct Session {
     id: usize,
     name: String,
     program: String,
-    pty: Arc<Mutex<Pty>>,
-    socket: Arc<Mutex<File>>,
+    pty: Pty,
+    // socket: Arc<Mutex<UnixStream>>,
+    sock_path: PathBuf,
 }
 
 impl Session {
-    fn new(id: usize, name: String, program: String, pty: Pty, socket: File) -> Self {
+    fn new(id: usize, name: String, program: String, pty: Pty, sock_path: PathBuf) -> Self {
         Self {
             id,
             name,
             program,
-            pty: Arc::new(Mutex::new(pty)),
-            socket: Arc::new(Mutex::new(socket)),
+            pty,
+            // socket: Arc::new(Mutex::new(socket)),
+            sock_path,
         }
     }
 
-    fn start(&mut self) -> Result<()> {
-        let pty = self.pty.clone();
-        let socket = self.socket.clone();
-        tokio::task::spawn(async move {
-            loop {
-                let mut pty = pty.lock().await;
-                let mut pty_file = pty.file();
+    async fn start(sock_path: PathBuf, fd: RawFd) -> Result<()> {
+        let socket = UnixListener::bind(sock_path)?;
+        let (stream, _addr) = socket.accept().await?;
 
-                let mut socket = socket.lock().await.try_clone().unwrap();
-                match pipe(&mut pty_file, &mut socket) {
-                    Err(e) => return Err(e),
-                    _ => (),
+        let (mut r_socket, mut w_socket) = stream.into_split();
+
+        // let w_socket = Arc::new(Mutex::new(w_socket));
+        // let r_socket = Arc::new(Mutex::new(r_socket));
+
+        tokio::task::spawn({
+            // let pty = unsafe { File::from_raw_fd(fd) };
+            let mut pty = unsafe { tokio::fs::File::from_raw_fd(fd) };
+            // let socket = w_socket.clone();
+            async move {
+                loop {
+                    // let Ok(mut socket) = socket.try_lock() else {
+                    //     tokio::task::yield_now().await;
+                    //     continue;
+                    // };
+                    // let Ok(mut pty) = pty.try_lock() else {
+                    //     tokio::task::yield_now().await;
+                    //     continue;
+                    // };
+                    // let pty_file = pty; //pty.file();
+                    let mut i_packet = [0; 4096];
+
+                    let i_count = pty.read(&mut i_packet).await?;
+                    let read = &i_packet[..i_count];
+                    w_socket.write_all(&read).await?;
+                    w_socket.flush().await?;
+                    let len = read.len();
+                    if len != 0 {
+                        println!("wrote to tty: {}", len);
+                    }
+                    tokio::task::yield_now().await;
                 }
-                match pipe(&mut socket, &mut pty_file) {
-                    Err(e) => return Err(e),
-                    _ => (),
-                }
-                tokio::signal::unix::signal(SignalKind::window_change())?
-                    .recv()
-                    .await;
-                pty.resize(&Size::term_size()?)
-                    .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                #[allow(unreachable_code)]
+                Result::<_, anyhow::Error>::Ok(())
             }
-            #[allow(unreachable_code)]
-            Ok(())
         });
+        tokio::task::spawn({
+            // let pty = pty.clone();
+            let mut pty = unsafe { tokio::fs::File::from_raw_fd(fd) };
+            // let socket = self.socket.clone();
+            // let socket = socket.clone();
+            async move {
+                loop {
+                    // let mut socket = socket.lock().await.accept().await?.0;
+                    // let Ok(mut socket) = socket.try_lock() else {
+                    //     tokio::task::yield_now().await;
+                    //     continue;
+                    // };
+                    // let Ok(mut pty) = pty.try_lock() else {
+                    //     tokio::task::yield_now().await;
+                    //     continue;
+                    // };
+                    // let pty_file = pty.file();
+
+                    let mut o_packet = [0; 4096];
+
+                    let o_count = r_socket.read(&mut o_packet).await?;
+                    let read = &o_packet[..o_count];
+                    pty.write_all(&read).await?;
+                    pty.flush().await?;
+                    let len = read.len();
+                    if len != 0 {
+                        println!("read from tty: {}", len);
+                    }
+                    tokio::task::yield_now().await;
+                }
+                #[allow(unreachable_code)]
+                Result::<_, anyhow::Error>::Ok(())
+            }
+        });
+        // tokio::task::spawn({
+        //     let pty = self.pty.clone();
+        //     async move {
+        //         loop {
+        //             let pty = pty.lock().await;
+        //             tokio::signal::unix::signal(SignalKind::window_change())?
+        //                 .recv()
+        //                 .await;
+        //             pty.resize(&Size::term_size()?)
+        //                 .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        //         }
+        //         #[allow(unreachable_code)]
+        //         Result::<_, anyhow::Error>::Ok(())
+        //     }
+        // });
         Ok(())
     }
-}
-
-/// Sends the content of input into output
-fn pipe(input: &mut dyn std::io::Read, output: &mut dyn std::io::Write) -> Result<()> {
-    let mut packet = [0; 4096];
-
-    let count = input.read(&mut packet)?;
-
-    let read = &packet[..count];
-    output.write_all(&read)?;
-    output.flush()?;
-
-    Ok(())
 }
 
 impl Drop for Session {
@@ -185,6 +246,7 @@ impl Sesh {
                 let mut sessions = self.sessions.lock().await;
                 let nsessions = sessions.len();
 
+                // TODO: Find a better way to auto-name sessions
                 let name = PathBuf::from(&name)
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
@@ -195,16 +257,23 @@ impl Sesh {
 
                 println!("Starting session: {} on {}", sesh_name, sock_name);
 
-                let mut session = Session::new(
+                let session = Session::new(
                     nsessions,
                     sesh_name.clone(),
                     program,
                     pty,
-                    File::create(&sock_name)?,
+                    PathBuf::from(&sock_name),
                 );
-                session.start()?;
+                tokio::task::spawn({
+                    let sock = session.sock_path.clone();
+                    let fd = session.pty.fd();
+                    async move {
+                        Session::start(sock, fd).await?;
+                        Result::<_, anyhow::Error>::Ok(())
+                    }
+                });
 
-                sessions.insert(sesh_name.clone(), session);
+                sessions.insert(sesh_name, session);
                 Ok(CommandResponse::StartSession(SeshStartResponse {
                     socket: sock_name,
                 }))

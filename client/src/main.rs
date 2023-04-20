@@ -1,9 +1,20 @@
+use std::{
+    io::{Read, Write},
+    sync::atomic::{AtomicBool, Ordering},
+};
+
 use clap::{Parser, Subcommand};
-use tokio::net::UnixStream;
+use termion::{get_tty, raw::IntoRawMode};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UnixStream,
+};
 use tonic::transport::{Endpoint, Uri};
 use tower::service_fn;
 
 use sesh_proto::{sesh_client::SeshClient, SeshStartRequest};
+
+static mut EXIT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, clap::Parser)]
 struct Cli {
@@ -36,6 +47,10 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ctrlc::set_handler(move || unsafe {
+        EXIT.store(true, Ordering::Relaxed);
+    })?;
+
     let args = Cli::parse();
 
     // Create a channel to the server socket
@@ -62,9 +77,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 program,
                 args,
             });
-            let response = client.start_session(request).await?;
+            let socket = client.start_session(request).await?.into_inner().socket;
+            let mut tty_output = get_tty().unwrap().into_raw_mode().unwrap();
+            let mut tty_input = tty_output.try_clone().unwrap();
 
-            println!("RESPONSE={:?}", response.into_inner());
+            let (mut r_stream, mut w_stream) = UnixStream::connect(&socket).await?.into_split();
+
+            let handle = tokio::task::spawn(async move {
+                while unsafe { EXIT.swap(false, Ordering::Relaxed) } == false {
+                    let mut i_packet = [0; 4096];
+
+                    let i_count = r_stream.read(&mut i_packet).await?;
+                    let read = &i_packet[..i_count];
+                    tty_output.write_all(&read)?;
+                    tty_output.flush()?;
+                    tokio::task::yield_now().await;
+                }
+                #[allow(unreachable_code)]
+                Result::<_, anyhow::Error>::Ok(())
+            });
+
+            while unsafe { EXIT.swap(false, Ordering::Relaxed) } == false {
+                let mut o_packet = [0; 4096];
+
+                let o_count = tty_input.read(&mut o_packet)?;
+                let read = &o_packet[..o_count];
+                w_stream.write_all(&read).await?;
+                w_stream.flush().await?;
+            }
+            handle.await??;
         }
         Command::Kill {
             name: None,
