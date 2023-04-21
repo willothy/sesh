@@ -13,6 +13,9 @@ use tokio::fs::File;
 
 use crate::{error::CResult, term::Size};
 
+const PTY_ERR: &str = "Failed to open pty";
+const PRG_ERR: &str = "Failed to spawn shell";
+
 pub struct Pty {
     /// Master FD
     fd: RawFd,
@@ -35,19 +38,17 @@ impl Pty {
         unsafe {
             cmd.pre_exec(pre_exec);
         }
-        cmd.spawn()
-            .map_err(|_| anyhow!("Failed to spawn shell"))
-            .and_then(|e| {
-                let pty = Pty {
-                    fd: master,
-                    file: unsafe { File::from_raw_fd(master) },
-                    pid: e.id() as i32,
-                };
+        cmd.spawn().map_err(|_| anyhow!(PRG_ERR)).and_then(|e| {
+            let pty = Pty {
+                fd: master,
+                file: unsafe { File::from_raw_fd(master) },
+                pid: e.id() as i32,
+            };
 
-                pty.resize(&size)?;
+            pty.resize(&size)?;
 
-                Ok(pty)
-            })
+            Ok(pty)
+        })
     }
 
     pub fn pid(&self) -> i32 {
@@ -72,7 +73,7 @@ impl Pty {
             )
             .to_result()
             .map(|_| ())
-            .context("Failed to open pty")
+            .context(PTY_ERR)
         }
     }
 }
@@ -92,16 +93,16 @@ fn openpty(size: &Size) -> Result<(RawFd, RawFd)> {
             &size.into(),
         )
         .to_result()
-        .context("Failed to open pty")?;
+        .context(PTY_ERR)?;
 
         // Configure master to be non blocking
         let current_config = libc::fcntl(master, libc::F_GETFL, 0)
             .to_result()
-            .context("Failed to open pty")?;
+            .context(PTY_ERR)?;
 
         libc::fcntl(master, libc::F_SETFL, current_config)
             .to_result()
-            .context("Failed to open pty")?;
+            .context(PTY_ERR)?;
     }
 
     Ok((master, slave))
@@ -111,14 +112,22 @@ fn openpty(size: &Size) -> Result<(RawFd, RawFd)> {
 fn pre_exec() -> io::Result<()> {
     unsafe {
         // Create a new process group, this process being the master
-        libc::setsid()
-            .to_result()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, ""))?;
+        libc::setsid().to_result().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to create process group: {}", e),
+            )
+        })?;
 
         // Set this process as the controling terminal
         libc::ioctl(0, libc::TIOCSCTTY, 1)
             .to_result()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, ""))?;
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to set controlling terminal: {}", e),
+                )
+            })?;
     }
 
     Ok(())

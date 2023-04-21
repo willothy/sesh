@@ -15,6 +15,7 @@ message SeshStartRequest {
 
 message SeshStartResponse {
 	string socket = 1;
+	int32 pid = 2;
 }
 
 message SeshKillRequest {

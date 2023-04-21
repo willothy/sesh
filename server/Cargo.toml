@@ -19,3 +19,5 @@ termion = "2.0.1"
 sesh-shared = { path = "../shared" }
 sesh-proto = { path = "../proto" }
 ctrlc = "3.2.5"
+env_logger = "0.10.0"
+log = "0.4.17"

@@ -1,10 +1,12 @@
 use anyhow::Result;
+use log::info;
 use sesh_shared::{pty::Pty, term::Size};
 use std::{
     collections::HashMap,
     os::fd::{FromRawFd, RawFd},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -13,7 +15,6 @@ use tokio::{
     sync::Mutex,
 };
 use tokio_stream::wrappers::UnixListenerStream;
-
 use tonic::{transport::Server as RPCServer, Request, Response, Status};
 
 use sesh_proto::{
@@ -53,8 +54,9 @@ impl Session {
     }
 
     async fn start(sock_path: PathBuf, fd: RawFd) -> Result<()> {
-        let socket = UnixListener::bind(sock_path)?;
+        let socket = UnixListener::bind(&sock_path)?;
         let (stream, _addr) = socket.accept().await?;
+        info!("{}", libc::ESRCH);
 
         let (mut r_socket, mut w_socket) = stream.into_split();
 
@@ -68,11 +70,8 @@ impl Session {
                     let read = &i_packet[..i_count];
                     w_socket.write_all(&read).await?;
                     w_socket.flush().await?;
-                    let len = read.len();
-                    if len != 0 {
-                        println!("wrote to tty: {}", len);
-                    }
-                    tokio::task::yield_now().await;
+                    // TODO: Use a less hacky method of reducing CPU usage
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 #[allow(unreachable_code)]
                 Result::<_, anyhow::Error>::Ok(())
@@ -88,25 +87,22 @@ impl Session {
                     let read = &o_packet[..o_count];
                     pty.write_all(&read).await?;
                     pty.flush().await?;
-                    let len = read.len();
-                    if len != 0 {
-                        println!("read from tty: {}", len);
-                    }
-                    tokio::task::yield_now().await;
+                    // TODO: Use a less hacky method of reducing CPU usage
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 #[allow(unreachable_code)]
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
+        info!("Started session on {}", sock_path.display());
         Ok(())
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let sock_path = PathBuf::from(format!("/tmp/sesh/{}.sock", self.name));
         // get rid of the socket
-        std::fs::remove_file(sock_path).ok();
+        std::fs::remove_file(&self.sock_path).ok();
     }
 }
 
@@ -181,16 +177,18 @@ impl Sesh {
                     let mut to_remove = Vec::new();
                     for (name, session) in sessions.iter() {
                         let pid = session.pid();
-                        let mut status = 0;
-                        let res = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                        let res = unsafe { libc::waitpid(pid, &mut 0, libc::WNOHANG) };
                         if res > 0 {
-                            println!("exiting: {}", name);
+                            info!("{}: {} - Subprocess exited.", session.id, name);
                             to_remove.push(name.clone());
                         }
                     }
+                    // Remove sessions with exited processes
                     for name in to_remove {
                         sessions.remove(&name);
                     }
+                    // TODO: Use a less hacky method of reducing CPU usage
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 #[allow(unreachable_code)]
                 Result::<_, anyhow::Error>::Ok(())
@@ -200,17 +198,6 @@ impl Sesh {
     }
 
     pub async fn exec(&self, cmd: Command) -> Result<CommandResponse> {
-        println!("Executing command: {:?}", cmd);
-
-        // let mut queue = loop {
-        //     let Ok(queue) = self.queue.try_lock() else {
-        //         tokio::task::yield_now().await;
-        //         continue;
-        //     };
-        //     break queue;
-        // };
-
-        // while let Some(next) = queue.pop_front() {
         match cmd {
             Command::ListSessions(_) => {
                 let sessions = self.sessions.lock().await;
@@ -233,103 +220,115 @@ impl Sesh {
                     .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
                 let mut sessions = self.sessions.lock().await;
-                let nsessions = sessions.len();
+                let session_id = sessions.len();
+                let pid = pty.pid();
 
                 let name = PathBuf::from(&name)
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or(name.replace("/", "_"));
 
-                let mut sesh_name = format!("{}", name);
+                let mut session_name = name.clone();
                 let mut i = 0;
-                while sessions.contains_key(&sesh_name) {
-                    sesh_name = format!("{}-{}", name, i);
+                while sessions.contains_key(&session_name) {
+                    session_name = format!("{}-{}", name, i);
                     i += 1;
                 }
 
-                let sock_name = format!("/tmp/sesh/{}.sock", &sesh_name);
-
-                println!("Starting session: {} on {}", sesh_name, sock_name);
+                let socket_path = format!("/tmp/sesh/{}.sock", &session_name);
 
                 let session = Session::new(
-                    nsessions,
-                    sesh_name.clone(),
+                    session_id,
+                    session_name.clone(),
                     program,
                     pty,
-                    PathBuf::from(&sock_name),
+                    PathBuf::from(&socket_path),
+                );
+                info!(
+                    "{}:{} - Starting on {}",
+                    session.id,
+                    &session.name,
+                    &session.sock_path.display()
                 );
                 tokio::task::spawn({
-                    let sock = session.sock_path.clone();
+                    let socket = session.sock_path.clone();
                     let fd = session.pty.fd();
                     async move {
-                        Session::start(sock, fd).await?;
+                        Session::start(socket, fd).await?;
                         Result::<_, anyhow::Error>::Ok(())
                     }
                 });
 
-                sessions.insert(sesh_name, session);
+                sessions.insert(session.name.clone(), session);
                 Ok(CommandResponse::StartSession(SeshStartResponse {
-                    socket: sock_name,
+                    socket: socket_path,
+                    pid,
                 }))
             }
             Command::KillSession(request) => {
                 if let Some(session) = request.session {
                     let mut sessions = self.sessions.lock().await;
-                    match session {
-                        sesh_proto::sesh_kill_request::Session::Name(name) => {
-                            println!("Killing session: {:?}", name);
-                            Ok(CommandResponse::KillSession(SeshKillResponse {
-                                success: sessions.remove(&name).is_some(),
-                            }))
-                        }
+                    let name = match session {
+                        sesh_proto::sesh_kill_request::Session::Name(name) => Some(name),
                         sesh_proto::sesh_kill_request::Session::Id(id) => {
-                            println!("Killing session: {:?}", id);
-                            let mut success = false;
-                            sessions.retain(|_, s| {
-                                if s.id == id as usize {
-                                    success = true;
-                                    false
-                                } else {
-                                    true
-                                }
-                            });
-                            Ok(CommandResponse::KillSession(SeshKillResponse { success }))
+                            let name = sessions
+                                .iter()
+                                .find(|(_, s)| s.id == id as usize)
+                                .map(|(_, s)| s.name.clone());
+                            name
                         }
-                    }
+                    };
+
+                    let success = if let Some(name) = name {
+                        if let Some(session) = sessions.remove(&name) {
+                            info!("{}:{} - Killing.", session.id, &session.name);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    Ok(CommandResponse::KillSession(SeshKillResponse { success }))
                 } else {
+                    // TODO: Kill the *current* session and exit?
                     Ok(CommandResponse::KillSession(SeshKillResponse {
                         success: false,
                     }))
                 }
             }
         }
-        // tokio::task::yield_now().await;
-        // }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let sock_path = PathBuf::from(SERVER_SOCK);
-    let sock_parent = sock_path.parent();
-    if let Some(parent) = sock_parent {
+    env_logger::init();
+    info!("Starting up");
+    let socket_path = PathBuf::from(SERVER_SOCK);
+    let parent_dir = socket_path.parent();
+    if let Some(parent) = parent_dir {
+        // Ensure /tmp/sesh/ exists
         std::fs::create_dir_all(parent)?;
     }
 
+    // Create the server socket
     let uds = UnixListener::bind(SERVER_SOCK)?;
     let uds_stream = UnixListenerStream::new(uds);
 
+    // Initialize the Tonic gRPC server
     RPCServer::builder()
         .add_service(SeshServer::new(Sesh::new()?))
         // .serve_with_incoming(uds_stream)
         .serve_with_incoming_shutdown(uds_stream, async move {
             // Shutdown on sigint
-            tokio::signal::ctrl_c().await.unwrap();
+            // TODO: Create shutdown command for server
+            tokio::signal::ctrl_c().await.ok();
         })
         .await?;
 
     // remove socket on exit
-    std::fs::remove_file(&sock_path)?;
+    std::fs::remove_file(&socket_path)?;
 
     Ok(())
 }
