@@ -56,7 +56,6 @@ impl Session {
     async fn start(sock_path: PathBuf, fd: RawFd) -> Result<()> {
         let socket = UnixListener::bind(&sock_path)?;
         let (stream, _addr) = socket.accept().await?;
-        info!("{}", libc::ESRCH);
 
         let (mut r_socket, mut w_socket) = stream.into_split();
 

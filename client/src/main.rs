@@ -88,7 +88,7 @@ async fn start_session(
             tty_output.write_all(&read)?;
             tty_output.flush()?;
             // TODO: Use a less hacky method of reducing CPU usage
-            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            tokio::time::sleep(tokio::time::Duration::from_nanos(200)).await;
         }
         Result::<_, anyhow::Error>::Ok(())
     });
@@ -101,7 +101,7 @@ async fn start_session(
             w_stream.write_all(&read).await?;
             w_stream.flush().await?;
             // TODO: Use a less hacky method of reducing CPU usage
-            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            // tokio::time::sleep(tokio::time::Duration::from_nanos(200)).await;
         }
         Result::<_, anyhow::Error>::Ok(())
     });
@@ -121,7 +121,7 @@ async fn start_session(
             }
         }
         // TODO: Use a less hacky method of reducing CPU usage
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
     // w_handle.abort();
