@@ -55,6 +55,7 @@ enum Command {
     },
     #[command(alias = "ls")]
     List,
+    Shutdown,
 }
 
 async fn start_session(
@@ -178,6 +179,17 @@ async fn init_client() -> Result<SeshClient<Channel>> {
     Ok(SeshClient::new(channel))
 }
 
+async fn shutdown_server(mut client: SeshClient<Channel>) -> Result<()> {
+    let request = tonic::Request::new(sesh_proto::ShutdownServerRequest {});
+    let response = client.shutdown_server(request).await?;
+    if response.into_inner().success {
+        println!("Server shutdown successfully.");
+    } else {
+        println!("Server shutdown failed.");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctrlc::set_handler(move || unsafe {
@@ -202,6 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             id: None,
         } => kill_session(client, None, Some(name)).await?,
         Command::List => list_sessions(client).await?,
+        Command::Shutdown => shutdown_server(client).await?,
         _ => {
             println!("Invalid command");
             return Ok(());

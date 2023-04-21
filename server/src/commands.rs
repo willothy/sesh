@@ -4,11 +4,13 @@ use sesh_proto::*;
 pub enum Command {
     StartSession(SeshStartRequest),
     KillSession(SeshKillRequest),
-    ListSessions(SeshListRequest),
+    ListSessions,
+    ShutdownServer,
 }
 
 pub enum CommandResponse {
     StartSession(SeshStartResponse),
     KillSession(SeshKillResponse),
     ListSessions(SeshListResponse),
+    ShutdownServer(ShutdownServerResponse),
 }

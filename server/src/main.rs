@@ -12,7 +12,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixListener,
     signal::unix::{signal, SignalKind},
-    sync::Mutex,
+    sync::{mpsc::UnboundedSender, Mutex},
 };
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{transport::Server as RPCServer, Request, Response, Status};
@@ -20,6 +20,7 @@ use tonic::{transport::Server as RPCServer, Request, Response, Status};
 use sesh_proto::{
     sesh_server::{Sesh as RPCDefs, SeshServer},
     SeshKillRequest, SeshKillResponse, SeshListResponse, SeshStartRequest, SeshStartResponse,
+    ShutdownServerRequest, ShutdownServerResponse,
 };
 
 mod commands;
@@ -111,6 +112,7 @@ struct Sesh {
     // just uncomment the queue related things, it's working already though probably not optimal
     // queue: Arc<Mutex<VecDeque<Command>>>,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
+    exit_signal: UnboundedSender<()>,
 }
 
 #[tonic::async_trait]
@@ -147,11 +149,9 @@ impl RPCDefs for Sesh {
 
     async fn list_sessions(
         &self,
-        request: Request<sesh_proto::SeshListRequest>,
+        _: Request<sesh_proto::SeshListRequest>,
     ) -> Result<Response<sesh_proto::SeshListResponse>, Status> {
-        let req = request.into_inner();
-
-        let res = self.exec(Command::ListSessions(req)).await;
+        let res = self.exec(Command::ListSessions).await;
 
         match res {
             Ok(CommandResponse::ListSessions(response)) => Ok(Response::new(response)),
@@ -159,10 +159,23 @@ impl RPCDefs for Sesh {
             Err(e) => Err(Status::internal(format!("Error: {}", e))),
         }
     }
+
+    async fn shutdown_server(
+        &self,
+        _: tonic::Request<ShutdownServerRequest>,
+    ) -> Result<Response<ShutdownServerResponse>, Status> {
+        let res = self.exec(Command::ShutdownServer).await;
+
+        match res {
+            Ok(CommandResponse::ShutdownServer(response)) => Ok(Response::new(response)),
+            Ok(_) => Err(Status::internal("Unexpected response")),
+            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+        }
+    }
 }
 
 impl Sesh {
-    fn new() -> Result<Self> {
+    fn new(exit_signal: UnboundedSender<()>) -> Result<Self> {
         let sessions = Arc::new(Mutex::new(HashMap::<String, Session>::new()));
         // Handle process exits
         // TODO: Send exit signal to connected clients
@@ -193,12 +206,15 @@ impl Sesh {
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
-        Ok(Self { sessions })
+        Ok(Self {
+            sessions,
+            exit_signal,
+        })
     }
 
     pub async fn exec(&self, cmd: Command) -> Result<CommandResponse> {
         match cmd {
-            Command::ListSessions(_) => {
+            Command::ListSessions => {
                 let sessions = self.sessions.lock().await;
                 let sessions = sessions
                     .iter()
@@ -296,6 +312,13 @@ impl Sesh {
                     }))
                 }
             }
+            Command::ShutdownServer => {
+                info!("Shutting down server");
+                self.exit_signal.send(())?;
+                return Ok(CommandResponse::ShutdownServer(ShutdownServerResponse {
+                    success: true,
+                }));
+            }
         }
     }
 }
@@ -315,14 +338,23 @@ async fn main() -> Result<()> {
     let uds = UnixListener::bind(SERVER_SOCK)?;
     let uds_stream = UnixListenerStream::new(uds);
 
+    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+    let sigint_tx = exit_tx.clone();
+    ctrlc::set_handler(move || {
+        sigint_tx.send(()).ok();
+    })?;
+
     // Initialize the Tonic gRPC server
     RPCServer::builder()
-        .add_service(SeshServer::new(Sesh::new()?))
+        .add_service(SeshServer::new(Sesh::new(exit_tx)?))
         // .serve_with_incoming(uds_stream)
         .serve_with_incoming_shutdown(uds_stream, async move {
             // Shutdown on sigint
             // TODO: Create shutdown command for server
-            tokio::signal::ctrl_c().await.ok();
+
+            // tokio::signal::ctrl_c().await.ok();
+            exit_rx.recv().await;
         })
         .await?;
 

@@ -5,6 +5,13 @@ service Sesh {
 	rpc StartSession (SeshStartRequest) returns (SeshStartResponse);
 	rpc KillSession (SeshKillRequest) returns (SeshKillResponse);
 	rpc ListSessions (SeshListRequest) returns (SeshListResponse);
+	rpc ShutdownServer (ShutdownServerRequest) returns (ShutdownServerResponse);
+}
+
+message ShutdownServerRequest {}
+
+message ShutdownServerResponse {
+	bool success = 1;
 }
 
 message SeshStartRequest {
