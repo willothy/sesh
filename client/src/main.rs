@@ -92,7 +92,7 @@ async fn start_session(
         }
         Result::<_, anyhow::Error>::Ok(())
     });
-    tokio::task::spawn(async move {
+    let w_handle = tokio::task::spawn(async move {
         while unsafe { EXIT.load(Ordering::Relaxed) } == false {
             let mut packet = [0; 4096];
 
@@ -124,7 +124,7 @@ async fn start_session(
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
-    // w_handle.abort();
+    w_handle.abort();
     r_handle.await??;
     Ok(())
 }
