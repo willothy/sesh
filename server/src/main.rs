@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use log::{info, warn};
+use log::{error, info, trace};
 use sesh_shared::{error::CResult, pty::Pty, term::Size};
 use std::{
     collections::HashMap,
@@ -12,7 +12,6 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    fs,
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixListener,
     signal::unix::{signal, SignalKind},
@@ -38,21 +37,22 @@ struct Session {
     name: String,
     program: String,
     pty: Pty,
-    // socket: Arc<Mutex<UnixStream>>,
     sock_path: PathBuf,
     connected: Arc<AtomicBool>,
+    listener: Arc<UnixListener>,
 }
 
 impl Session {
-    fn new(id: usize, name: String, program: String, pty: Pty, sock_path: PathBuf) -> Self {
-        Self {
+    fn new(id: usize, name: String, program: String, pty: Pty, sock_path: PathBuf) -> Result<Self> {
+        Ok(Self {
             id,
             name,
             program,
             pty,
-            sock_path,
             connected: Arc::new(AtomicBool::new(false)),
-        }
+            listener: Arc::new(UnixListener::bind(&sock_path)?),
+            sock_path,
+        })
     }
 
     fn pid(&self) -> i32 {
@@ -61,14 +61,14 @@ impl Session {
 
     async fn start(
         sock_path: PathBuf,
+        socket: Arc<UnixListener>,
         fd: RawFd,
         connected: Arc<AtomicBool>,
         size: Size,
     ) -> Result<()> {
-        let socket = UnixListener::bind(&sock_path)?;
-        info!("Listening on {:?}", sock_path);
+        info!(target: "session", "Listening on {:?}", sock_path);
         let (stream, _addr) = socket.accept().await?;
-        info!("Accepted connection from {:?}", _addr);
+        info!(target: "session", "Accepted connection from {:?}", _addr);
         connected.store(true, Ordering::Release);
 
         let (mut r_socket, mut w_socket) = stream.into_split();
@@ -92,25 +92,24 @@ impl Session {
             let connected = connected.clone();
             let mut pty = pty.try_clone().await?;
             async move {
-                info!("Starting pty write loop");
+                info!(target: "session", "Starting pty write loop");
                 while connected.load(Ordering::Relaxed) == true {
                     let mut i_packet = [0; 4096];
 
                     let i_count = pty.read(&mut i_packet).await?;
                     if i_count == 0 {
-                        warn!("Read 0, exiting pty write loop");
                         connected.store(false, Ordering::Relaxed);
                         w_socket.flush().await?;
                         break;
                     }
-                    info!("Read {} bytes from pty", i_count);
+                    trace!(target: "session", "Read {} bytes from pty", i_count);
                     let read = &i_packet[..i_count];
                     w_socket.write_all(&read).await?;
                     w_socket.flush().await?;
                     // TODO: Use a less hacky method of reducing CPU usage
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
-                info!("Exiting pty read loop");
+                info!(target: "session","Exiting pty read loop");
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
@@ -118,38 +117,36 @@ impl Session {
             let connected = connected.clone();
             let mut pty = pty.try_clone().await?;
             async move {
-                info!("Starting socket read loop");
+                info!(target: "session","Starting socket read loop");
                 while connected.load(Ordering::Relaxed) == true {
                     let mut o_packet = [0; 4096];
 
                     let o_count = r_socket.read(&mut o_packet).await?;
                     if o_count == 0 {
-                        warn!("Read 0, exiting socket read loop");
                         connected.store(false, Ordering::Relaxed);
                         w_handle.abort();
                         pty.flush().await?;
                         break;
                     }
-                    info!("Read {} bytes from socket", o_count);
+                    trace!(target: "session","Read {} bytes from socket", o_count);
                     let read = &o_packet[..o_count];
                     pty.write_all(&read).await?;
                     pty.flush().await?;
                     // TODO: Use a less hacky method of reducing CPU usage
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
-                info!("Exiting socket read loop");
+                info!(target: "session","Exiting socket and pty read loops");
 
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
-        info!("Started session on {}", sock_path.display());
+        info!(target: "session", "Started {}", sock_path.display());
         Ok(())
     }
 
     async fn detach(&self) -> Result<()> {
         info!("Detaching session {}", self.id);
         self.connected.store(false, Ordering::Relaxed);
-        fs::remove_file(&self.sock_path).await?;
         Ok(())
     }
 }
@@ -163,9 +160,7 @@ impl Drop for Session {
 
 #[derive(Clone)]
 struct Sesh {
-    // do I need to queue events?
-    // just uncomment the queue related things, it's working already though probably not optimal
-    // queue: Arc<Mutex<VecDeque<Command>>>,
+    // TODO: Do I need to queue events?
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     exit_signal: UnboundedSender<()>,
 }
@@ -183,7 +178,11 @@ impl RPCDefs for Sesh {
         match res {
             Ok(CommandResponse::StartSession(response)) => Ok(Response::new(response)),
             Ok(_) => Err(Status::internal("Unexpected response")),
-            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+            Err(e) => {
+                let err_s = format!("{}", e);
+                error!(target: "rpc", "{}", err_s);
+                Err(Status::internal(err_s))
+            }
         }
     }
 
@@ -198,7 +197,11 @@ impl RPCDefs for Sesh {
         match res {
             Ok(CommandResponse::AttachSession(response)) => Ok(Response::new(response)),
             Ok(_) => Err(Status::internal("Unexpected response")),
-            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+            Err(e) => {
+                let err_s = format!("{}", e);
+                error!(target: "rpc", "{}", err_s);
+                Err(Status::internal(err_s))
+            }
         }
     }
 
@@ -213,7 +216,11 @@ impl RPCDefs for Sesh {
         match res {
             Ok(CommandResponse::DetachSession(response)) => Ok(Response::new(response)),
             Ok(_) => Err(Status::internal("Unexpected response")),
-            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+            Err(e) => {
+                let err_s = format!("{}", e);
+                error!(target: "rpc", "{}", err_s);
+                Err(Status::internal(err_s))
+            }
         }
     }
 
@@ -228,7 +235,11 @@ impl RPCDefs for Sesh {
         match res {
             Ok(CommandResponse::KillSession(response)) => Ok(Response::new(response)),
             Ok(_) => Err(Status::internal("Unexpected response")),
-            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+            Err(e) => {
+                let err_s = format!("{}", e);
+                error!(target: "rpc", "{}", err_s);
+                Err(Status::internal(err_s))
+            }
         }
     }
 
@@ -241,7 +252,11 @@ impl RPCDefs for Sesh {
         match res {
             Ok(CommandResponse::ListSessions(response)) => Ok(Response::new(response)),
             Ok(_) => Err(Status::internal("Unexpected response")),
-            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+            Err(e) => {
+                let err_s = format!("{}", e);
+                error!(target: "rpc", "{}", err_s);
+                Err(Status::internal(err_s))
+            }
         }
     }
 
@@ -254,7 +269,11 @@ impl RPCDefs for Sesh {
         match res {
             Ok(CommandResponse::ShutdownServer(response)) => Ok(Response::new(response)),
             Ok(_) => Err(Status::internal("Unexpected response")),
-            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+            Err(e) => {
+                let err_s = format!("{}", e);
+                error!(target: "rpc", "{}", err_s);
+                Err(Status::internal(err_s))
+            }
         }
     }
 }
@@ -276,7 +295,10 @@ impl Sesh {
                         let pid = session.pid();
                         let res = unsafe { libc::waitpid(pid, &mut 0, libc::WNOHANG) };
                         if res > 0 {
-                            info!("{}: {} - Subprocess exited.", session.id, name);
+                            info!(
+                                target: &format!("{}: {}", session.id, name),
+                                "Subprocess {} exited", session.program
+                            );
                             to_remove.push(name.clone());
                         }
                     }
@@ -353,7 +375,7 @@ impl Sesh {
                     program,
                     pty,
                     PathBuf::from(&socket_path),
-                );
+                )?;
                 info!(
                     "{}:{} - Starting on {}",
                     session.id,
@@ -361,7 +383,8 @@ impl Sesh {
                     &session.sock_path.display()
                 );
                 tokio::task::spawn({
-                    let socket = session.sock_path.clone();
+                    let sock_path = session.sock_path.clone();
+                    let socket = session.listener.clone();
                     // let file = session.pty.file().try_clone().await?;
                     let file = session.pty.file().as_raw_fd();
                     // Duplicate FD
@@ -369,7 +392,7 @@ impl Sesh {
                     let file = unsafe { libc::fcntl(file, libc::F_DUPFD, file) };
                     let connected = session.connected.clone();
                     async move {
-                        Session::start(socket, file, connected, size).await?;
+                        Session::start(sock_path, socket, file, connected, size).await?;
                         Result::<_, anyhow::Error>::Ok(())
                     }
                 });
@@ -384,14 +407,17 @@ impl Sesh {
             Command::AttachSession(SeshAttachRequest { session, size }) => {
                 if let Some(session) = session {
                     let sessions = self.sessions.lock().await;
-                    let session = match session {
-                        sesh_proto::sesh_attach_request::Session::Name(name) => sessions.get(&name),
+                    let session = match &session {
+                        sesh_proto::sesh_attach_request::Session::Name(name) => sessions.get(name),
                         sesh_proto::sesh_attach_request::Session::Id(id) => sessions
                             .iter()
-                            .find(|(_, s)| s.id == id as usize)
+                            .find(|(_, s)| s.id == *id as usize)
                             .map(|(_, s)| s),
                     }
-                    .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Session {} not found", session))?;
+                    if session.connected.load(Ordering::Relaxed) {
+                        return Err(anyhow::anyhow!("Session already connected"));
+                    }
                     let size = if let Some(size) = size {
                         Size {
                             rows: size.rows as u16,
@@ -402,12 +428,13 @@ impl Sesh {
                         Size::term_size()?
                     };
                     tokio::task::spawn({
-                        let socket = session.sock_path.clone();
+                        let sock_path = session.sock_path.clone();
+                        let socket = session.listener.clone();
                         let file = session.pty.file().as_raw_fd();
                         let file = unsafe { libc::fcntl(file, libc::F_DUPFD, file) };
                         let connected = session.connected.clone();
                         async move {
-                            Session::start(socket, file, connected, size).await?;
+                            Session::start(sock_path, socket, file, connected, size).await?;
                             Result::<_, anyhow::Error>::Ok(())
                         }
                     });
@@ -478,7 +505,6 @@ impl Sesh {
                 }
             }
             Command::ShutdownServer => {
-                info!("Shutting down server");
                 self.exit_signal.send(())?;
                 return Ok(CommandResponse::ShutdownServer(ShutdownServerResponse {
                     success: true,
@@ -491,7 +517,7 @@ impl Sesh {
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
-    info!("Starting up");
+    info!(target: "init", "Starting up");
     let socket_path = PathBuf::from(SERVER_SOCK);
     let parent_dir = socket_path.parent();
     if let Some(parent) = parent_dir {
@@ -511,18 +537,16 @@ async fn main() -> Result<()> {
     })?;
 
     // Initialize the Tonic gRPC server
+    info!(target: "init", "Setting up RPC server");
     RPCServer::builder()
         .add_service(SeshServer::new(Sesh::new(exit_tx)?))
         // .serve_with_incoming(uds_stream)
         .serve_with_incoming_shutdown(uds_stream, async move {
-            // Shutdown on sigint
-            // TODO: Create shutdown command for server
-
-            // tokio::signal::ctrl_c().await.ok();
             exit_rx.recv().await;
         })
         .await?;
 
+    info!(target: "exit", "Shutting down");
     // remove socket on exit
     std::fs::remove_file(&socket_path)?;
 

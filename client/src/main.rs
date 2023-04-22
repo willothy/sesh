@@ -1,5 +1,5 @@
 use std::{
-    io::{stdin, Read, Write},
+    io::{Read, Write},
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -35,7 +35,7 @@ enum Command {
         program: Option<String>,
         args: Vec<String>,
         #[arg(short, long)]
-        no_attach: bool,
+        detached: bool,
     },
     #[group(required = true, multiple = false)]
     #[command(alias = "a")]
@@ -68,8 +68,8 @@ async fn exec_session(
 ) -> Result<()> {
     let mut tty_output = get_tty().unwrap().into_raw_mode().unwrap();
     tty_output.activate_raw_mode()?;
-    // let mut tty_input = tty_output.try_clone().unwrap();
-    let mut tty_input = stdin();
+    let mut tty_input = tty_output.try_clone().unwrap();
+    // let mut tty_input = stdin();
 
     let (mut r_stream, mut w_stream) = UnixStream::connect(&socket).await?.into_split();
 
@@ -99,8 +99,9 @@ async fn exec_session(
             }
             let read = &packet[..nbytes];
 
-            if read.iter().find(|&&x| x == 0x07).is_some() {
-                w_stream.flush().await?;
+            // Ctrl-\
+            // TODO: Make this configurable
+            if read[0] == 0x1c {
                 detach_session(client, None, Some(name)).await?;
                 break;
             }
@@ -131,9 +132,9 @@ async fn exec_session(
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
+    // the write handle will block if it's not aborted
     w_handle.abort();
     r_handle.await??;
-    // r_handle.abort();
     Ok(())
 }
 
@@ -292,8 +293,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             name,
             program,
             args,
-            no_attach,
-        } => start_session(client, name, program, args, !no_attach).await?,
+            detached,
+        } => start_session(client, name, program, args, !detached).await?,
         Command::Kill { name, id } => kill_session(client, id, name).await?,
         Command::Attach { name, id } => attach_session(client, id, name).await?,
         Command::List => list_sessions(client).await?,
