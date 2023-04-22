@@ -11,9 +11,22 @@ service Sesh {
 	rpc AttachSession (SeshAttachRequest) returns (SeshAttachResponse);
 	rpc DetachSession (SeshDetachRequest) returns (SeshDetachResponse);
 
+	// Resize
+ 	rpc ResizeSession (SeshResizeRequest) returns (SeshResizeResponse);
+
 	// Server
 	rpc ShutdownServer (ShutdownServerRequest) returns (ShutdownServerResponse);
 }
+
+message SeshResizeRequest {
+	oneof session {
+		string name = 1;
+		uint64 id = 2;
+	}
+	WinSize size = 3;
+}
+
+message SeshResizeResponse {}
 
 message SeshDetachRequest {
 	oneof session {

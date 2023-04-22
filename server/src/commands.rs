@@ -8,6 +8,7 @@ pub enum Command {
     ShutdownServer,
     AttachSession(SeshAttachRequest),
     DetachSession(SeshDetachRequest),
+    ResizeSession(SeshResizeRequest),
 }
 
 pub enum CommandResponse {
@@ -17,4 +18,5 @@ pub enum CommandResponse {
     ShutdownServer(ShutdownServerResponse),
     AttachSession(SeshAttachResponse),
     DetachSession(SeshDetachResponse),
+    ResizeSession(SeshResizeResponse),
 }

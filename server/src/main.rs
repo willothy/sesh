@@ -23,8 +23,8 @@ use tonic::{transport::Server as RPCServer, Request, Response, Status};
 use sesh_proto::{
     sesh_server::{Sesh as RPCDefs, SeshServer},
     SeshAttachRequest, SeshAttachResponse, SeshDetachRequest, SeshDetachResponse, SeshKillRequest,
-    SeshKillResponse, SeshListResponse, SeshStartRequest, SeshStartResponse, ShutdownServerRequest,
-    ShutdownServerResponse,
+    SeshKillResponse, SeshListResponse, SeshResizeRequest, SeshResizeResponse, SeshStartRequest,
+    SeshStartResponse, ShutdownServerRequest, ShutdownServerResponse,
 };
 
 mod commands;
@@ -53,6 +53,10 @@ impl Session {
         })
     }
 
+    fn log_group(&self) -> String {
+        format!("{}: {}", self.id, self.name)
+    }
+
     fn pid(&self) -> i32 {
         self.pty.pid()
     }
@@ -78,7 +82,7 @@ impl Session {
                 libc::TIOCSWINSZ,
                 &Into::<libc::winsize>::into(&sesh_shared::term::Size {
                     rows: size.rows,
-                    cols: size.cols,
+                    cols: size.cols - 1,
                 }),
             )
             .to_result()
@@ -98,6 +102,7 @@ impl Session {
                     if i_count == 0 {
                         connected.store(false, Ordering::Relaxed);
                         w_socket.flush().await?;
+                        pty.flush().await?;
                         break;
                     }
                     trace!(target: "session", "Read {} bytes from pty", i_count);
@@ -126,7 +131,7 @@ impl Session {
                         pty.flush().await?;
                         break;
                     }
-                    trace!(target: "session","Read {} bytes from socket", o_count);
+                    trace!(target: "session", "Read {} bytes from socket", o_count);
                     let read = &o_packet[..o_count];
                     pty.write_all(&read).await?;
                     pty.flush().await?;
@@ -143,7 +148,6 @@ impl Session {
     }
 
     async fn detach(&self) -> Result<()> {
-        info!("Detaching session {}", self.id);
         self.connected.store(false, Ordering::Relaxed);
         Ok(())
     }
@@ -259,6 +263,25 @@ impl RPCDefs for Sesh {
         }
     }
 
+    async fn resize_session(
+        &self,
+        request: Request<SeshResizeRequest>,
+    ) -> Result<Response<SeshResizeResponse>, Status> {
+        let req = request.into_inner();
+
+        let res = self.exec(Command::ResizeSession(req)).await;
+
+        match res {
+            Ok(CommandResponse::ResizeSession(res)) => Ok(Response::new(res)),
+            Ok(_) => Err(Status::internal("Unexpected response")),
+            Err(e) => {
+                let err_s = format!("{}", e);
+                error!(target: "rpc", "{}", err_s);
+                Err(Status::internal(err_s))
+            }
+        }
+    }
+
     async fn shutdown_server(
         &self,
         _: tonic::Request<ShutdownServerRequest>,
@@ -326,7 +349,39 @@ impl Sesh {
 
     pub async fn exec(&self, cmd: Command) -> Result<CommandResponse> {
         match cmd {
+            Command::ResizeSession(SeshResizeRequest { session, size }) => {
+                let Some(size) = size else {
+                    return Err(anyhow::anyhow!("Invalid size"));
+                };
+                let sessions = self.sessions.lock().await;
+                let Some(session) = session else {
+                    return Err(anyhow::anyhow!("Session not found"));
+                };
+                let Some(name) = (match session {
+                    sesh_proto::sesh_resize_request::Session::Name(name) => Some(name),
+                    sesh_proto::sesh_resize_request::Session::Id(id) => {
+                        let name = sessions
+                            .iter()
+                            .find(|(_, s)| s.id == id as usize)
+                            .map(|(_, s)| s.name.clone());
+                        name
+                    }
+                }) else {
+                    return Err(anyhow::anyhow!("Session not found"));
+                };
+                let session = sessions
+                    .get(&name)
+                    .ok_or_else(|| anyhow::anyhow!("Session not found: {}", name))?;
+                info!(target: &session.log_group(), "Resizing");
+
+                session.pty.resize(&Size {
+                    cols: size.cols as u16,
+                    rows: size.rows as u16,
+                })?;
+                Ok(CommandResponse::ResizeSession(SeshResizeResponse {}))
+            }
             Command::ListSessions => {
+                info!(target: "exec", "Listing sessions");
                 let sessions = self.sessions.lock().await;
                 let sessions = sessions
                     .iter()
@@ -389,12 +444,7 @@ impl Sesh {
                     pty,
                     PathBuf::from(&socket_path),
                 )?;
-                info!(
-                    "{}:{} - Starting on {}",
-                    session.id,
-                    &session.name,
-                    &session.sock_path.display()
-                );
+                info!(target: &session.log_group(), "Starting on {}", session.sock_path.display());
                 tokio::task::spawn({
                     let sock_path = session.sock_path.clone();
                     let socket = session.listener.clone();
@@ -431,6 +481,7 @@ impl Sesh {
                     if session.connected.load(Ordering::Relaxed) {
                         return Err(anyhow::anyhow!("Session already connected"));
                     }
+                    info!(target: &session.log_group(), "Attaching");
                     let size = if let Some(size) = size {
                         Size {
                             rows: size.rows as u16,
@@ -440,6 +491,10 @@ impl Sesh {
                     } else {
                         Size::term_size()?
                     };
+                    session.pty.resize(&Size {
+                        cols: (size.cols as u16).checked_sub(2).unwrap_or(2),
+                        rows: (size.rows as u16).checked_sub(2).unwrap_or(2),
+                    })?;
                     tokio::task::spawn({
                         let sock_path = session.sock_path.clone();
                         let socket = session.listener.clone();
@@ -501,7 +556,7 @@ impl Sesh {
 
                     let success = if let Some(name) = name {
                         if let Some(session) = sessions.remove(&name) {
-                            info!("{}:{} - Killing.", session.id, &session.name);
+                            info!(target: &session.log_group(), "Killing subprocess");
                             true
                         } else {
                             false
@@ -553,9 +608,21 @@ async fn main() -> Result<()> {
     let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
     let sigint_tx = exit_tx.clone();
-    ctrlc::set_handler(move || {
-        sigint_tx.send(()).ok();
-    })?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let sigquit_tx = exit_tx.clone();
+    let mut sigquit = signal(SignalKind::quit())?;
+    tokio::task::spawn(async move {
+        tokio::select! {
+            _ = sigint.recv() => {
+                info!(target: "exit", "Received SIGINT");
+                sigint_tx.send(()).ok();
+            },
+            _ = sigquit.recv() => {
+                info!(target: "exit", "Received SIGQUIT");
+                sigquit_tx.send(()).ok();
+            }
+        }
+    });
 
     // Initialize the Tonic gRPC server
     info!(target: "init", "Setting up RPC server");

@@ -7,16 +7,21 @@ use std::{
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use ctrlc::SignalType;
 use sesh_shared::{pty::Pty, term::Size};
 use termion::{get_tty, raw::IntoRawMode, screen::IntoAlternateScreen};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
+    signal::unix::{signal, SignalKind},
 };
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
-use sesh_proto::{sesh_client::SeshClient, sesh_kill_request::Session, SeshStartRequest, WinSize};
+use sesh_proto::{
+    sesh_client::SeshClient, sesh_kill_request::Session, sesh_resize_request, SeshResizeRequest,
+    SeshStartRequest, WinSize,
+};
 
 static mut EXIT: AtomicBool = AtomicBool::new(false);
 
@@ -103,32 +108,59 @@ async fn exec_session(
         }
         Result::<_, anyhow::Error>::Ok(())
     });
-    let w_handle = tokio::task::spawn(async move {
-        while unsafe { EXIT.load(Ordering::Relaxed) } == false {
-            let mut packet = [0; 4096];
+    let w_handle = tokio::task::spawn({
+        let client = client.clone();
+        let name = name.clone();
+        async move {
+            while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+                let mut packet = [0; 4096];
 
-            let nbytes = tty_input.read(&mut packet)?;
-            if nbytes == 0 {
-                break;
+                let nbytes = tty_input.read(&mut packet)?;
+                if nbytes == 0 {
+                    break;
+                }
+                let read = &packet[..nbytes];
+
+                // Alt-\
+                // TODO: Make this configurable
+
+                if nbytes >= 2 && read[0] == 27 && read[1] == 92 {
+                    detach_session(client, None, Some(name)).await?;
+                    break;
+                }
+
+                w_stream.write_all(&read).await?;
+                w_stream.flush().await?;
+                // TODO: Use a less hacky method of reducing CPU usage
+                // tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
             }
-            let read = &packet[..nbytes];
-
-            // Ctrl-\
-            // TODO: Make this configurable
-
-            if nbytes >= 2 && read[0] == 27 && read[1] == 92 {
-                detach_session(client, None, Some(name)).await?;
-                break;
-            }
-
-            w_stream.write_all(&read).await?;
-            w_stream.flush().await?;
-            // TODO: Use a less hacky method of reducing CPU usage
-            // tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
+            Result::<_, anyhow::Error>::Ok(())
         }
-        Result::<_, anyhow::Error>::Ok(())
     });
 
+    tokio::task::spawn({
+        let name = name.clone();
+        let mut client = client.clone();
+        async move {
+            while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+                signal(SignalKind::window_change())?.recv().await;
+                let size = {
+                    let s = termion::terminal_size()?;
+                    WinSize {
+                        rows: s.1 as u32,
+                        cols: s.0 as u32,
+                    }
+                };
+                client
+                    .resize_session(SeshResizeRequest {
+                        size: Some(size),
+                        session: Some(sesh_resize_request::Session::Name(name.clone())),
+                    })
+                    .await?;
+            }
+            Result::<_, anyhow::Error>::Ok(())
+        }
+    });
     while unsafe { EXIT.load(Ordering::Relaxed) } == false {
         unsafe {
             // This doesn't actually kill the process, it just checks if it exists
