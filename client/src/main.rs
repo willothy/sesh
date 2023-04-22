@@ -2,10 +2,12 @@ use std::{
     io::{Read, Write},
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use sesh_shared::{pty::Pty, term::Size};
 use termion::{get_tty, raw::IntoRawMode};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -279,12 +281,30 @@ async fn shutdown_server(mut client: SeshClient<Channel>) -> Result<()> {
     Ok(())
 }
 
+fn server_exists() -> bool {
+    Path::new(SOCK_PATH).exists()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctrlc::set_handler(move || unsafe {
         EXIT.store(true, Ordering::Relaxed);
     })?;
     let args = Cli::parse();
+
+    if !server_exists() {
+        let mut pty = Pty::spawn(
+            "/home/willothy/projects/rust/sesh/target/release/seshd",
+            vec![],
+            &Size::term_size()?,
+        )?;
+        let pid = pty.pid();
+        pty.daemonize();
+        // while unsafe { libc::kill(pid, 0) != 0 } {
+        //     std::thread::sleep(Duration::from_millis(2));
+        // }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     let client = init_client().await?;
 

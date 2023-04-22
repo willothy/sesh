@@ -285,6 +285,7 @@ impl Sesh {
         // TODO: Send exit signal to connected clients
         tokio::task::spawn({
             let sessions = sessions.clone();
+            let exit = exit_signal.clone();
             async move {
                 let mut signal = signal(SignalKind::child())?;
                 loop {
@@ -305,6 +306,9 @@ impl Sesh {
                     // Remove sessions with exited processes
                     for name in to_remove {
                         sessions.remove(&name);
+                    }
+                    if sessions.is_empty() {
+                        exit.send(())?;
                     }
                     // TODO: Use a less hacky method of reducing CPU usage
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -330,7 +334,10 @@ impl Sesh {
                         name: name.clone(),
                         program: session.program.clone(),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
+                if sessions.is_empty() {
+                    self.exit_signal.clone().send(())?;
+                }
                 Ok(CommandResponse::ListSessions(SeshListResponse { sessions }))
             }
             Command::StartSession(SeshStartRequest {
@@ -496,6 +503,9 @@ impl Sesh {
                     } else {
                         false
                     };
+                    if sessions.is_empty() {
+                        self.exit_signal.send(())?;
+                    }
                     Ok(CommandResponse::KillSession(SeshKillResponse { success }))
                 } else {
                     // TODO: Kill the *current* session and exit?

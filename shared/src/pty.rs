@@ -23,6 +23,7 @@ pub struct Pty {
     file: File,
     /// Pid of the child process
     pid: i32,
+    kill_on_drop: bool,
 }
 
 impl Pty {
@@ -43,12 +44,17 @@ impl Pty {
                 fd: master,
                 file: unsafe { File::from_raw_fd(master) },
                 pid: e.id() as i32,
+                kill_on_drop: true,
             };
 
             pty.resize(&size)?;
 
             Ok(pty)
         })
+    }
+
+    pub fn daemonize(&mut self) {
+        self.kill_on_drop = false;
     }
 
     pub fn pid(&self) -> i32 {
@@ -137,23 +143,25 @@ fn pre_exec() -> io::Result<()> {
 impl Drop for Pty {
     fn drop(&mut self) {
         unsafe {
-            let fd = self.fd.clone();
-            let pid = self.pid.clone();
-            // Close file descriptor
-            libc::close(fd);
-            // Kill the owned processed when the Pty is dropped
-            libc::kill(pid, libc::SIGTERM);
-            std::thread::sleep(Duration::from_millis(5));
+            if self.kill_on_drop {
+                let fd = self.fd.clone();
+                let pid = self.pid.clone();
+                // Close file descriptor
+                libc::close(fd);
+                // Kill the owned processed when the Pty is dropped
+                libc::kill(pid, libc::SIGTERM);
+                std::thread::sleep(Duration::from_millis(5));
 
-            let mut status = 0;
-            // make sure the process has exited
-            libc::waitpid(pid, &mut status, libc::WNOHANG);
+                let mut status = 0;
+                // make sure the process has exited
+                libc::waitpid(pid, &mut status, libc::WNOHANG);
 
-            // if it hasn't exited, force kill it and clean up the zombie process
-            if status <= 0 {
-                // The process exists but hasn't changed state, or there was an error
-                libc::kill(pid, libc::SIGKILL);
-                libc::waitpid(pid, &mut status, 0);
+                // if it hasn't exited, force kill it and clean up the zombie process
+                if status <= 0 {
+                    // The process exists but hasn't changed state, or there was an error
+                    libc::kill(pid, libc::SIGKILL);
+                    libc::waitpid(pid, &mut status, 0);
+                }
             }
         }
     }
