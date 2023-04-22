@@ -6,6 +6,8 @@ pub enum Command {
     KillSession(SeshKillRequest),
     ListSessions,
     ShutdownServer,
+    AttachSession(SeshAttachRequest),
+    DetachSession(SeshDetachRequest),
 }
 
 pub enum CommandResponse {
@@ -13,4 +15,6 @@ pub enum CommandResponse {
     KillSession(SeshKillResponse),
     ListSessions(SeshListResponse),
     ShutdownServer(ShutdownServerResponse),
+    AttachSession(SeshAttachResponse),
+    DetachSession(SeshDetachResponse),
 }

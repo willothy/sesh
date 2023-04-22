@@ -888,6 +888,7 @@ dependencies = [
  "anyhow",
  "libc",
  "prost",
+ "sesh-proto",
  "termion",
  "tokio",
  "tokio-stream",

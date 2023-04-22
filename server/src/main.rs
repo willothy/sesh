@@ -1,14 +1,18 @@
-use anyhow::Result;
-use log::info;
-use sesh_shared::{pty::Pty, term::Size};
+use anyhow::{Context, Result};
+use log::{info, warn};
+use sesh_shared::{error::CResult, pty::Pty, term::Size};
 use std::{
     collections::HashMap,
-    os::fd::{FromRawFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, RawFd},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::{
+    fs,
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixListener,
     signal::unix::{signal, SignalKind},
@@ -19,8 +23,9 @@ use tonic::{transport::Server as RPCServer, Request, Response, Status};
 
 use sesh_proto::{
     sesh_server::{Sesh as RPCDefs, SeshServer},
-    SeshKillRequest, SeshKillResponse, SeshListResponse, SeshStartRequest, SeshStartResponse,
-    ShutdownServerRequest, ShutdownServerResponse,
+    SeshAttachRequest, SeshAttachResponse, SeshDetachRequest, SeshDetachResponse, SeshKillRequest,
+    SeshKillResponse, SeshListResponse, SeshStartRequest, SeshStartResponse, ShutdownServerRequest,
+    ShutdownServerResponse,
 };
 
 mod commands;
@@ -35,6 +40,7 @@ struct Session {
     pty: Pty,
     // socket: Arc<Mutex<UnixStream>>,
     sock_path: PathBuf,
+    connected: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -44,57 +50,106 @@ impl Session {
             name,
             program,
             pty,
-            // socket: Arc::new(Mutex::new(socket)),
             sock_path,
+            connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    #[inline(always)]
     fn pid(&self) -> i32 {
         self.pty.pid()
     }
 
-    async fn start(sock_path: PathBuf, fd: RawFd) -> Result<()> {
+    async fn start(
+        sock_path: PathBuf,
+        fd: RawFd,
+        connected: Arc<AtomicBool>,
+        size: Size,
+    ) -> Result<()> {
         let socket = UnixListener::bind(&sock_path)?;
+        info!("Listening on {:?}", sock_path);
         let (stream, _addr) = socket.accept().await?;
+        info!("Accepted connection from {:?}", _addr);
+        connected.store(true, Ordering::Release);
 
         let (mut r_socket, mut w_socket) = stream.into_split();
 
-        tokio::task::spawn({
-            let mut pty = unsafe { tokio::fs::File::from_raw_fd(fd) };
+        let pty = unsafe { tokio::fs::File::from_raw_fd(fd) };
+        unsafe {
+            libc::ioctl(
+                fd,
+                libc::TIOCSWINSZ,
+                &Into::<libc::winsize>::into(&sesh_shared::term::Size {
+                    rows: size.rows,
+                    cols: size.cols,
+                }),
+            )
+            .to_result()
+            .map(|_| ())
+            .context("Failed to resize")?;
+        }
+
+        let w_handle = tokio::task::spawn({
+            let connected = connected.clone();
+            let mut pty = pty.try_clone().await?;
             async move {
-                loop {
+                info!("Starting pty write loop");
+                while connected.load(Ordering::Relaxed) == true {
                     let mut i_packet = [0; 4096];
 
                     let i_count = pty.read(&mut i_packet).await?;
+                    if i_count == 0 {
+                        warn!("Read 0, exiting pty write loop");
+                        connected.store(false, Ordering::Relaxed);
+                        w_socket.flush().await?;
+                        break;
+                    }
+                    info!("Read {} bytes from pty", i_count);
                     let read = &i_packet[..i_count];
                     w_socket.write_all(&read).await?;
                     w_socket.flush().await?;
                     // TODO: Use a less hacky method of reducing CPU usage
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
-                #[allow(unreachable_code)]
+                info!("Exiting pty read loop");
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
         tokio::task::spawn({
-            let mut pty = unsafe { tokio::fs::File::from_raw_fd(fd) };
+            let connected = connected.clone();
+            let mut pty = pty.try_clone().await?;
             async move {
-                loop {
+                info!("Starting socket read loop");
+                while connected.load(Ordering::Relaxed) == true {
                     let mut o_packet = [0; 4096];
 
                     let o_count = r_socket.read(&mut o_packet).await?;
+                    if o_count == 0 {
+                        warn!("Read 0, exiting socket read loop");
+                        connected.store(false, Ordering::Relaxed);
+                        w_handle.abort();
+                        pty.flush().await?;
+                        break;
+                    }
+                    info!("Read {} bytes from socket", o_count);
                     let read = &o_packet[..o_count];
                     pty.write_all(&read).await?;
                     pty.flush().await?;
                     // TODO: Use a less hacky method of reducing CPU usage
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
-                #[allow(unreachable_code)]
+                info!("Exiting socket read loop");
+
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
         info!("Started session on {}", sock_path.display());
+        Ok(())
+    }
+
+    async fn detach(&self) -> Result<()> {
+        info!("Detaching session {}", self.id);
+        self.connected.store(false, Ordering::Relaxed);
+        fs::remove_file(&self.sock_path).await?;
         Ok(())
     }
 }
@@ -127,6 +182,36 @@ impl RPCDefs for Sesh {
 
         match res {
             Ok(CommandResponse::StartSession(response)) => Ok(Response::new(response)),
+            Ok(_) => Err(Status::internal("Unexpected response")),
+            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+        }
+    }
+
+    async fn attach_session(
+        &self,
+        request: Request<sesh_proto::SeshAttachRequest>,
+    ) -> Result<Response<sesh_proto::SeshAttachResponse>, Status> {
+        let req = request.into_inner();
+
+        let res = self.exec(Command::AttachSession(req)).await;
+
+        match res {
+            Ok(CommandResponse::AttachSession(response)) => Ok(Response::new(response)),
+            Ok(_) => Err(Status::internal("Unexpected response")),
+            Err(e) => Err(Status::internal(format!("Error: {}", e))),
+        }
+    }
+
+    async fn detach_session(
+        &self,
+        request: Request<sesh_proto::SeshDetachRequest>,
+    ) -> Result<Response<sesh_proto::SeshDetachResponse>, Status> {
+        let req = request.into_inner();
+
+        let res = self.exec(Command::DetachSession(req)).await;
+
+        match res {
+            Ok(CommandResponse::DetachSession(response)) => Ok(Response::new(response)),
             Ok(_) => Err(Status::internal("Unexpected response")),
             Err(e) => Err(Status::internal(format!("Error: {}", e))),
         }
@@ -230,9 +315,19 @@ impl Sesh {
                 name,
                 program,
                 args,
+                size,
             }) => {
                 let pty = Pty::spawn(&program, args, &Size::term_size()?)
                     .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                let size = if let Some(size) = size {
+                    Size {
+                        rows: size.rows as u16,
+                        cols: size.cols as u16,
+                    }
+                } else {
+                    Size::term_size()?
+                };
+                pty.resize(&size)?;
 
                 let mut sessions = self.sessions.lock().await;
                 let session_id = sessions.len();
@@ -267,9 +362,14 @@ impl Sesh {
                 );
                 tokio::task::spawn({
                     let socket = session.sock_path.clone();
-                    let fd = session.pty.fd();
+                    // let file = session.pty.file().try_clone().await?;
+                    let file = session.pty.file().as_raw_fd();
+                    // Duplicate FD
+                    // I do not know why this makes the socket connection not die, but it does
+                    let file = unsafe { libc::fcntl(file, libc::F_DUPFD, file) };
+                    let connected = session.connected.clone();
                     async move {
-                        Session::start(socket, fd).await?;
+                        Session::start(socket, file, connected, size).await?;
                         Result::<_, anyhow::Error>::Ok(())
                     }
                 });
@@ -277,7 +377,72 @@ impl Sesh {
                 sessions.insert(session.name.clone(), session);
                 Ok(CommandResponse::StartSession(SeshStartResponse {
                     socket: socket_path,
+                    name: session_name,
                     pid,
+                }))
+            }
+            Command::AttachSession(SeshAttachRequest { session, size }) => {
+                if let Some(session) = session {
+                    let sessions = self.sessions.lock().await;
+                    let session = match session {
+                        sesh_proto::sesh_attach_request::Session::Name(name) => sessions.get(&name),
+                        sesh_proto::sesh_attach_request::Session::Id(id) => sessions
+                            .iter()
+                            .find(|(_, s)| s.id == id as usize)
+                            .map(|(_, s)| s),
+                    }
+                    .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+                    let size = if let Some(size) = size {
+                        Size {
+                            rows: size.rows as u16,
+                            cols: size.cols as u16,
+                            ..Size::term_size()?
+                        }
+                    } else {
+                        Size::term_size()?
+                    };
+                    tokio::task::spawn({
+                        let socket = session.sock_path.clone();
+                        let file = session.pty.file().as_raw_fd();
+                        let file = unsafe { libc::fcntl(file, libc::F_DUPFD, file) };
+                        let connected = session.connected.clone();
+                        async move {
+                            Session::start(socket, file, connected, size).await?;
+                            Result::<_, anyhow::Error>::Ok(())
+                        }
+                    });
+
+                    Ok(CommandResponse::AttachSession(SeshAttachResponse {
+                        socket: session.sock_path.to_string_lossy().to_string(),
+                        pid: session.pid(),
+                        name: session.name.clone(),
+                    }))
+                } else {
+                    anyhow::bail!("No session specified");
+                }
+            }
+            Command::DetachSession(SeshDetachRequest { session }) => {
+                if let Some(session) = session {
+                    let sessions = self.sessions.lock().await;
+                    let name = match session {
+                        sesh_proto::sesh_detach_request::Session::Name(name) => Some(name),
+                        sesh_proto::sesh_detach_request::Session::Id(id) => {
+                            let name = sessions
+                                .iter()
+                                .find(|(_, s)| s.id == id as usize)
+                                .map(|(_, s)| s.name.clone());
+                            name
+                        }
+                    };
+
+                    if let Some(name) = name {
+                        if let Some(session) = sessions.get(&name) {
+                            session.detach().await?;
+                        }
+                    }
+                }
+                Ok(CommandResponse::DetachSession(SeshDetachResponse {
+                    success: true,
                 }))
             }
             Command::KillSession(request) => {

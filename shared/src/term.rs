@@ -15,6 +15,8 @@ impl Size {
     }
 }
 
+// impl Into<sesh_proto::
+
 impl Into<libc::winsize> for &Size {
     fn into(self) -> libc::winsize {
         libc::winsize {

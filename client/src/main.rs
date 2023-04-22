@@ -14,7 +14,7 @@ use tokio::{
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
-use sesh_proto::{sesh_client::SeshClient, sesh_kill_request::Session, SeshStartRequest};
+use sesh_proto::{sesh_client::SeshClient, sesh_kill_request::Session, SeshStartRequest, WinSize};
 
 static mut EXIT: AtomicBool = AtomicBool::new(false);
 const SOCK_PATH: &str = "/tmp/sesh/server.sock";
@@ -34,6 +34,8 @@ enum Command {
         name: Option<String>,
         program: Option<String>,
         args: Vec<String>,
+        #[arg(short, long)]
+        no_attach: bool,
     },
     #[group(required = true, multiple = false)]
     #[command(alias = "a")]
@@ -58,21 +60,12 @@ enum Command {
     Shutdown,
 }
 
-async fn start_session(
-    mut client: SeshClient<Channel>,
-    name: Option<String>,
-    program: Option<String>,
-    args: Vec<String>,
-) -> anyhow::Result<()> {
-    let program = program.unwrap_or_else(|| "bash".to_owned());
-    let request = tonic::Request::new(SeshStartRequest {
-        name: name.unwrap_or_else(|| program.clone()),
-        program,
-        args,
-    });
-    let response = client.start_session(request).await?.into_inner();
-    let socket = response.socket;
-    let pid = response.pid;
+async fn exec_session(
+    client: SeshClient<Channel>,
+    pid: i32,
+    socket: String,
+    name: String,
+) -> Result<()> {
     let mut tty_output = get_tty().unwrap().into_raw_mode().unwrap();
     tty_output.activate_raw_mode()?;
     // let mut tty_input = tty_output.try_clone().unwrap();
@@ -85,6 +78,9 @@ async fn start_session(
             let mut packet = [0; 4096];
 
             let nbytes = r_stream.read(&mut packet).await?;
+            if nbytes == 0 {
+                break;
+            }
             let read = &packet[..nbytes];
             tty_output.write_all(&read)?;
             tty_output.flush()?;
@@ -98,11 +94,21 @@ async fn start_session(
             let mut packet = [0; 4096];
 
             let nbytes = tty_input.read(&mut packet)?;
+            if nbytes == 0 {
+                break;
+            }
             let read = &packet[..nbytes];
+
+            if read.iter().find(|&&x| x == 0x07).is_some() {
+                w_stream.flush().await?;
+                detach_session(client, None, Some(name)).await?;
+                break;
+            }
+
             w_stream.write_all(&read).await?;
             w_stream.flush().await?;
             // TODO: Use a less hacky method of reducing CPU usage
-            // tokio::time::sleep(tokio::time::Duration::from_nanos(200)).await;
+            // tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
         }
         Result::<_, anyhow::Error>::Ok(())
     });
@@ -127,6 +133,88 @@ async fn start_session(
 
     w_handle.abort();
     r_handle.await??;
+    // r_handle.abort();
+    Ok(())
+}
+
+async fn start_session(
+    mut client: SeshClient<Channel>,
+    name: Option<String>,
+    program: Option<String>,
+    args: Vec<String>,
+    attach: bool,
+) -> anyhow::Result<()> {
+    let program = program.unwrap_or_else(|| "bash".to_owned());
+    let size = {
+        let s = termion::terminal_size()?;
+        WinSize {
+            rows: s.1 as u32,
+            cols: s.0 as u32,
+        }
+    };
+    let req = tonic::Request::new(SeshStartRequest {
+        name: name.unwrap_or_else(|| program.clone()),
+        program,
+        args,
+        size: Some(size),
+    });
+    let res = client.start_session(req).await?.into_inner();
+    if attach {
+        exec_session(client, res.pid, res.socket, res.name).await?;
+    }
+    Ok(())
+}
+
+async fn attach_session(
+    mut client: SeshClient<Channel>,
+    id: Option<usize>,
+    name: Option<String>,
+) -> Result<()> {
+    use sesh_proto::sesh_attach_request::Session::*;
+    let session = match (id, name) {
+        (Some(id), None) => Id(id as u64),
+        (None, Some(name)) => Name(name),
+        _ => unreachable!("This should be unreachable due to CLI"),
+    };
+    let size = {
+        let s = termion::terminal_size()?;
+        WinSize {
+            rows: s.1 as u32,
+            cols: s.0 as u32,
+        }
+    };
+    let req = tonic::Request::new(sesh_proto::SeshAttachRequest {
+        session: Some(session),
+        size: Some(size),
+    });
+    let res = client.attach_session(req).await?.into_inner();
+    exec_session(client, res.pid, res.socket, res.name).await?;
+    Ok(())
+}
+
+async fn detach_session(
+    mut client: SeshClient<Channel>,
+    id: Option<usize>,
+    name: Option<String>,
+) -> Result<()> {
+    use sesh_proto::sesh_detach_request::Session::*;
+    let session = match (id, name) {
+        (Some(id), None) => Id(id as u64),
+        (None, Some(name)) => Name(name),
+        _ => unreachable!("This should be unreachable due to CLI"),
+    };
+    let request = tonic::Request::new(sesh_proto::SeshDetachRequest {
+        session: Some(session),
+    });
+    let response = client.detach_session(request).await?;
+    unsafe {
+        EXIT.store(true, Ordering::Relaxed);
+    }
+    if response.into_inner().success {
+        println!("Session detached successfully.");
+    } else {
+        println!("Session not found.");
+    }
     Ok(())
 }
 
@@ -204,21 +292,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             name,
             program,
             args,
-        } => start_session(client, name, program, args).await?,
-        Command::Kill {
-            name: None,
-            id: Some(id),
-        } => kill_session(client, Some(id), None).await?,
-        Command::Kill {
-            name: Some(name),
-            id: None,
-        } => kill_session(client, None, Some(name)).await?,
+            no_attach,
+        } => start_session(client, name, program, args, !no_attach).await?,
+        Command::Kill { name, id } => kill_session(client, id, name).await?,
+        Command::Attach { name, id } => attach_session(client, id, name).await?,
         Command::List => list_sessions(client).await?,
         Command::Shutdown => shutdown_server(client).await?,
-        _ => {
-            println!("Invalid command");
-            return Ok(());
-        }
+        // _ => {
+        //     println!("Invalid command");
+        //     return Ok(());
+        // }
     }
 
     // TODO: exit more cleanly

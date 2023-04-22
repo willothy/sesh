@@ -2,10 +2,47 @@ syntax = "proto3";
 package sesh;
 
 service Sesh {
+	// Sessions
 	rpc StartSession (SeshStartRequest) returns (SeshStartResponse);
 	rpc KillSession (SeshKillRequest) returns (SeshKillResponse);
 	rpc ListSessions (SeshListRequest) returns (SeshListResponse);
+
+	// Attach / Detach
+	rpc AttachSession (SeshAttachRequest) returns (SeshAttachResponse);
+	rpc DetachSession (SeshDetachRequest) returns (SeshDetachResponse);
+
+	// Server
 	rpc ShutdownServer (ShutdownServerRequest) returns (ShutdownServerResponse);
+}
+
+message SeshDetachRequest {
+	oneof session {
+		string name = 1;
+		uint64 id = 2;
+	}
+}
+
+message SeshDetachResponse {
+	bool success = 1;
+}
+
+message WinSize {
+ 	uint32 rows = 1;
+	uint32 cols = 2;
+}
+
+message SeshAttachRequest {
+	oneof session {
+		string name = 1;
+		uint64 id = 2;
+	};
+	WinSize size = 3;
+}
+
+message SeshAttachResponse {
+	string socket = 1;
+	int32 pid = 2;
+	string name = 3;
 }
 
 message ShutdownServerRequest {}
@@ -18,11 +55,13 @@ message SeshStartRequest {
 	string name = 1;
 	string program = 2;
 	repeated string args = 3;
+	WinSize size = 4;
 }
 
 message SeshStartResponse {
 	string socket = 1;
 	int32 pid = 2;
+	string name = 3;
 }
 
 message SeshKillRequest {

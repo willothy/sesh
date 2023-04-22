@@ -13,8 +13,8 @@ use tokio::fs::File;
 
 use crate::{error::CResult, term::Size};
 
-const PTY_ERR: &str = "Failed to open pty";
-const PRG_ERR: &str = "Failed to spawn shell";
+const PTY_ERR: &str = "[pty.rs] Failed to open pty";
+const PRG_ERR: &str = "[pty.rs] Failed to spawn shell";
 
 pub struct Pty {
     /// Master FD
@@ -55,8 +55,8 @@ impl Pty {
         self.pid
     }
 
-    pub fn file(&mut self) -> &mut File {
-        &mut self.file
+    pub fn file(&self) -> &File {
+        &self.file
     }
 
     pub fn fd(&self) -> RawFd {
