@@ -1,8 +1,8 @@
 use std::{
     io::{Read, Write},
-    path::Path,
+    path::PathBuf,
+    str::FromStr,
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
 };
 
 use anyhow::Result;
@@ -19,7 +19,6 @@ use tower::service_fn;
 use sesh_proto::{sesh_client::SeshClient, sesh_kill_request::Session, SeshStartRequest, WinSize};
 
 static mut EXIT: AtomicBool = AtomicBool::new(false);
-const SOCK_PATH: &str = "/tmp/sesh/server.sock";
 
 #[derive(Debug, clap::Parser)]
 struct Cli {
@@ -39,27 +38,39 @@ enum Command {
         #[arg(short, long)]
         detached: bool,
     },
-    #[group(required = true, multiple = false)]
     #[command(alias = "a")]
     /// Attach to a session [alias: a]
     Attach {
-        #[arg(short, long)]
-        name: Option<String>,
-        #[arg(short, long)]
-        id: Option<usize>,
+        /// Id or name of session
+        session: SessionSelector,
     },
-    #[group(required = true, multiple = false)]
     #[command(alias = "k")]
     /// Kill a session [alias: k]
     Kill {
-        #[arg(short, long)]
-        name: Option<String>,
-        #[arg(short, long)]
-        id: Option<usize>,
+        /// Id or name of session
+        session: SessionSelector,
     },
     #[command(alias = "ls")]
     List,
     Shutdown,
+}
+
+#[derive(Debug, Clone)]
+enum SessionSelector {
+    Id(usize),
+    Name(String),
+}
+
+impl FromStr for SessionSelector {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(id) = s.parse::<usize>() {
+            Ok(SessionSelector::Id(id))
+        } else {
+            Ok(SessionSelector::Name(s.to_owned()))
+        }
+    }
 }
 
 async fn exec_session(
@@ -168,16 +179,11 @@ async fn start_session(
     Ok(())
 }
 
-async fn attach_session(
-    mut client: SeshClient<Channel>,
-    id: Option<usize>,
-    name: Option<String>,
-) -> Result<()> {
+async fn attach_session(mut client: SeshClient<Channel>, session: SessionSelector) -> Result<()> {
     use sesh_proto::sesh_attach_request::Session::*;
-    let session = match (id, name) {
-        (Some(id), None) => Id(id as u64),
-        (None, Some(name)) => Name(name),
-        _ => unreachable!("This should be unreachable due to CLI"),
+    let session = match session {
+        SessionSelector::Id(id) => Id(id as u64),
+        SessionSelector::Name(name) => Name(name),
     };
     let size = {
         let s = termion::terminal_size()?;
@@ -221,18 +227,12 @@ async fn detach_session(
     Ok(())
 }
 
-async fn kill_session(
-    mut client: SeshClient<Channel>,
-    id: Option<usize>,
-    name: Option<String>,
-) -> Result<()> {
-    let session = match (id, name) {
-        (Some(id), None) => Session::Id(id as u64),
-        (None, Some(name)) => Session::Name(name),
-        _ => unreachable!("This should be unreachable due to CLI"),
-    };
+async fn kill_session(mut client: SeshClient<Channel>, session: SessionSelector) -> Result<()> {
     let request = tonic::Request::new(sesh_proto::SeshKillRequest {
-        session: Some(session),
+        session: Some(match session {
+            SessionSelector::Id(id) => Session::Id(id as u64),
+            SessionSelector::Name(name) => Session::Name(name),
+        }),
     });
     let response = client.kill_session(request).await?;
     if response.into_inner().success {
@@ -254,16 +254,19 @@ async fn list_sessions(mut client: SeshClient<Channel>) -> Result<()> {
     Ok(())
 }
 
-async fn init_client() -> Result<SeshClient<Channel>> {
-    if !Path::new(SOCK_PATH).exists() {
-        return Err(anyhow::anyhow!("Server socket not found at {}", SOCK_PATH));
+async fn init_client(sock_path: PathBuf) -> Result<SeshClient<Channel>> {
+    if !sock_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Server socket not found at {}",
+            sock_path.display()
+        ));
     }
 
     // Create a channel to the server socket
     let channel = Endpoint::try_from("http://[::]:50051")?
-        .connect_with_connector(service_fn(|_: Uri| {
+        .connect_with_connector(service_fn(move |_: Uri| {
             // Connect to a Uds socket
-            UnixStream::connect(SOCK_PATH)
+            UnixStream::connect(sock_path.clone())
         }))
         .await?;
 
@@ -281,10 +284,6 @@ async fn shutdown_server(mut client: SeshClient<Channel>) -> Result<()> {
     Ok(())
 }
 
-fn server_exists() -> bool {
-    Path::new(SOCK_PATH).exists()
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctrlc::set_handler(move || unsafe {
@@ -292,17 +291,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let args = Cli::parse();
 
-    if !server_exists() {
+    let rt = dirs::runtime_dir()
+        .unwrap_or(PathBuf::from("/tmp/"))
+        .join("sesh/");
+    let server_sock = rt.join("server.sock");
+
+    if !server_sock.exists() {
         let mut pty = Pty::spawn(
             &std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()),
             vec![],
             &Size::term_size()?,
         )?;
         pty.daemonize();
-        std::thread::sleep(Duration::from_millis(2));
+        while !server_sock.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
-    let client = init_client().await?;
+    let client = init_client(server_sock).await?;
 
     match args.command.unwrap_or(Command::List) {
         Command::Start {
@@ -311,8 +317,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args,
             detached,
         } => start_session(client, name, program, args, !detached).await?,
-        Command::Kill { name, id } => kill_session(client, id, name).await?,
-        Command::Attach { name, id } => attach_session(client, id, name).await?,
+        Command::Kill { session } => kill_session(client, session).await?,
+        Command::Attach { session } => attach_session(client, session).await?,
         Command::List => list_sessions(client).await?,
         Command::Shutdown => shutdown_server(client).await?,
     }

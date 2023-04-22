@@ -30,16 +30,14 @@ use sesh_proto::{
 mod commands;
 use commands::{Command, CommandResponse};
 
-pub const SERVER_SOCK: &str = "/tmp/sesh/server.sock";
-
 struct Session {
     id: usize,
     name: String,
     program: String,
     pty: Pty,
-    sock_path: PathBuf,
     connected: Arc<AtomicBool>,
     listener: Arc<UnixListener>,
+    sock_path: PathBuf,
 }
 
 impl Session {
@@ -163,6 +161,7 @@ struct Sesh {
     // TODO: Do I need to queue events?
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     exit_signal: UnboundedSender<()>,
+    runtime_dir: PathBuf,
 }
 
 #[tonic::async_trait]
@@ -279,7 +278,7 @@ impl RPCDefs for Sesh {
 }
 
 impl Sesh {
-    fn new(exit_signal: UnboundedSender<()>) -> Result<Self> {
+    fn new(exit_signal: UnboundedSender<()>, runtime_dir: PathBuf) -> Result<Self> {
         let sessions = Arc::new(Mutex::new(HashMap::<String, Session>::new()));
         // Handle process exits
         // TODO: Send exit signal to connected clients
@@ -317,9 +316,11 @@ impl Sesh {
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
+        info!(target: "rpc", "Server started");
         Ok(Self {
             sessions,
             exit_signal,
+            runtime_dir,
         })
     }
 
@@ -374,7 +375,7 @@ impl Sesh {
                     i += 1;
                 }
 
-                let socket_path = format!("/tmp/sesh/{}.sock", &session_name);
+                let socket_path = self.runtime_dir.join(format!("{}.sock", session_name));
 
                 let session = Session::new(
                     session_id,
@@ -406,7 +407,7 @@ impl Sesh {
 
                 sessions.insert(session.name.clone(), session);
                 Ok(CommandResponse::StartSession(SeshStartResponse {
-                    socket: socket_path,
+                    socket: socket_path.to_string_lossy().to_string(),
                     name: session_name,
                     pid,
                 }))
@@ -527,16 +528,21 @@ impl Sesh {
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
+
+    let runtime_dir = dirs::runtime_dir()
+        .unwrap_or(PathBuf::from("/tmp/"))
+        .join("sesh/");
+
     info!(target: "init", "Starting up");
-    let socket_path = PathBuf::from(SERVER_SOCK);
-    let parent_dir = socket_path.parent();
-    if let Some(parent) = parent_dir {
-        // Ensure /tmp/sesh/ exists
-        std::fs::create_dir_all(parent)?;
+    if !runtime_dir.exists() {
+        info!(target: "init", "Creating runtime directory");
+        std::fs::create_dir_all(&runtime_dir)?;
     }
 
     // Create the server socket
-    let uds = UnixListener::bind(SERVER_SOCK)?;
+    info!(target: "init", "Creating server socket");
+    let socket_path = runtime_dir.join("server.sock");
+    let uds = UnixListener::bind(&socket_path)?;
     let uds_stream = UnixListenerStream::new(uds);
 
     let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -549,7 +555,7 @@ async fn main() -> Result<()> {
     // Initialize the Tonic gRPC server
     info!(target: "init", "Setting up RPC server");
     RPCServer::builder()
-        .add_service(SeshServer::new(Sesh::new(exit_tx)?))
+        .add_service(SeshServer::new(Sesh::new(exit_tx, runtime_dir)?))
         // .serve_with_incoming(uds_stream)
         .serve_with_incoming_shutdown(uds_stream, async move {
             exit_rx.recv().await;
