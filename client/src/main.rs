@@ -293,7 +293,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
     if !server_exists() {
-        let mut pty = Pty::spawn("seshd", vec![], &Size::term_size()?)?;
+        let mut pty = Pty::spawn(
+            &std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()),
+            vec![],
+            &Size::term_size()?,
+        )?;
         pty.daemonize();
         std::thread::sleep(Duration::from_millis(2));
     }
