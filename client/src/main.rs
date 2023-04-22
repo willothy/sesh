@@ -114,7 +114,8 @@ async fn exec_session(
 
             // Ctrl-\
             // TODO: Make this configurable
-            if read[0] == 0x1c {
+
+            if nbytes >= 2 && read[0] == 27 && read[1] == 92 {
                 detach_session(client, None, Some(name)).await?;
                 break;
             }
