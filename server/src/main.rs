@@ -347,21 +347,8 @@ impl Sesh {
                 args,
                 size,
             }) => {
-                let pty = Pty::spawn(&program, args, &Size::term_size()?)
-                    .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-                let size = if let Some(size) = size {
-                    Size {
-                        rows: size.rows as u16,
-                        cols: size.cols as u16,
-                    }
-                } else {
-                    Size::term_size()?
-                };
-                pty.resize(&size)?;
-
                 let mut sessions = self.sessions.lock().await;
                 let session_id = sessions.len();
-                let pid = pty.pid();
 
                 let name = PathBuf::from(&name)
                     .file_name()
@@ -376,6 +363,24 @@ impl Sesh {
                 }
 
                 let socket_path = self.runtime_dir.join(format!("{}.sock", session_name));
+
+                let pty = Pty::spawn(
+                    &program,
+                    args,
+                    &Size::term_size()?,
+                    Some(vec![("SESH_SESSION", socket_path.clone())]),
+                )
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                let pid = pty.pid();
+                let size = if let Some(size) = size {
+                    Size {
+                        rows: size.rows as u16,
+                        cols: size.cols as u16,
+                    }
+                } else {
+                    Size::term_size()?
+                };
+                pty.resize(&size)?;
 
                 let session = Session::new(
                     session_id,

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
+    ffi::OsStr,
     io,
     os::unix::{
         io::{FromRawFd, RawFd},
@@ -27,7 +28,12 @@ pub struct Pty {
 }
 
 impl Pty {
-    pub fn spawn(shell: &str, args: Vec<String>, size: &Size) -> Result<Pty> {
+    pub fn spawn(
+        shell: &str,
+        args: Vec<String>,
+        size: &Size,
+        env: Option<impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>>,
+    ) -> Result<Pty> {
         let (master, slave) = openpty(&size)?;
 
         let mut cmd = Command::new(&shell);
@@ -35,6 +41,10 @@ impl Pty {
             .stdin(unsafe { Stdio::from_raw_fd(slave) })
             .stdout(unsafe { Stdio::from_raw_fd(slave) })
             .stderr(unsafe { Stdio::from_raw_fd(slave) });
+
+        if let Some(env) = env {
+            cmd.envs(env);
+        }
 
         unsafe {
             cmd.pre_exec(pre_exec);
