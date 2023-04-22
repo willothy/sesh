@@ -293,16 +293,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
     if !server_exists() {
-        let mut pty = Pty::spawn(
-            "/home/willothy/projects/rust/sesh/target/release/seshd",
-            vec![],
-            &Size::term_size()?,
-        )?;
-        let pid = pty.pid();
+        let mut pty = Pty::spawn("seshd", vec![], &Size::term_size()?)?;
         pty.daemonize();
-        // while unsafe { libc::kill(pid, 0) != 0 } {
-        //     std::thread::sleep(Duration::from_millis(2));
-        // }
         std::thread::sleep(Duration::from_millis(2));
     }
 
@@ -319,10 +311,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Attach { name, id } => attach_session(client, id, name).await?,
         Command::List => list_sessions(client).await?,
         Command::Shutdown => shutdown_server(client).await?,
-        // _ => {
-        //     println!("Invalid command");
-        //     return Ok(());
-        // }
     }
 
     // TODO: exit more cleanly
