@@ -8,7 +8,7 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use sesh_shared::{pty::Pty, term::Size};
-use termion::{get_tty, raw::IntoRawMode};
+use termion::{get_tty, raw::IntoRawMode, screen::IntoAlternateScreen};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -79,8 +79,9 @@ async fn exec_session(
     socket: String,
     name: String,
 ) -> Result<()> {
-    let mut tty_output = get_tty().unwrap().into_raw_mode().unwrap();
+    let mut tty_output = get_tty()?.into_alternate_screen()?.into_raw_mode()?;
     tty_output.activate_raw_mode()?;
+
     let mut tty_input = tty_output.try_clone().unwrap();
     // let mut tty_input = stdin();
 
