@@ -7,7 +7,6 @@ use std::{
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ctrlc::SignalType;
 use sesh_shared::{pty::Pty, term::Size};
 use termion::{get_tty, raw::IntoRawMode, screen::IntoAlternateScreen};
 use tokio::{
