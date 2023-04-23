@@ -341,7 +341,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()),
             vec![],
             &Size::term_size()?,
-            Option::<Vec<(&str, &str)>>::None,
         )?;
         pty.daemonize();
         while !server_sock.exists() {

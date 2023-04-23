@@ -419,13 +419,12 @@ impl Sesh {
 
                 let socket_path = self.runtime_dir.join(format!("{}.sock", session_name));
 
-                let pty = Pty::spawn(
-                    &program,
-                    args,
-                    &Size::term_size()?,
-                    Some(vec![("SESH_SESSION", socket_path.clone())]),
-                )
-                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                let pty = Pty::new(&program)
+                    .args(args)
+                    .env("SESH_SESSION", socket_path.clone())
+                    .env("SESH_NAME", session_name.clone())
+                    .spawn(&Size::term_size()?)?;
+
                 let pid = pty.pid();
                 let size = if let Some(size) = size {
                     Size {
