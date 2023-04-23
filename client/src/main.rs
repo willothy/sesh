@@ -25,6 +25,11 @@ use sesh_proto::{
 static mut EXIT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, clap::Parser)]
+#[clap(
+    name = "sesh",
+    version = "0.1.0",
+    author = "Will Hopkins <willothyh@gmail.com>"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -54,8 +59,10 @@ enum Command {
         /// Id or name of session
         session: SessionSelector,
     },
+    /// List sessions [alias: ls]
     #[command(alias = "ls")]
     List,
+    /// Shutdown the server (kill all sessions)
     Shutdown,
 }
 
