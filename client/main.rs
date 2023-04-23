@@ -527,7 +527,12 @@ async fn main() -> ExitCode {
 
     let cmd = match args.command {
         Some(cmd) => cmd,
-        None => Command::List,
+        None => Command::Start {
+            name: None,
+            program: None,
+            args: vec![],
+            detached: false,
+        },
     };
     if !server_sock.exists() {
         if matches!(cmd, Command::Shutdown)
