@@ -7,7 +7,7 @@ license = "MIT"
 description = "Unix terminal session manager"
 repository = "https://github.com/willothy/sesh"
 readme = "README.md"
-documentation = "https://docs.rs/sesh"
+documentation = "https://docs.rs/term-sesh"
 
 [[bin]]
 name = "seshd"
