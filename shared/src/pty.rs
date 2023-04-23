@@ -85,6 +85,11 @@ impl PtyBuilder {
         self.daemonize = daemonize;
     }
 
+    pub fn current_dir<P: AsRef<std::path::Path>>(mut self, dir: P) -> Self {
+        self.inner.current_dir(dir);
+        self
+    }
+
     pub fn spawn(self, size: &Size) -> Result<Pty> {
         let (master, slave) = Pty::open(size)?;
 

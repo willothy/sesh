@@ -1,6 +1,6 @@
 [package]
 name = "sesh-shared"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Will Hopkins <willothyh@gmail.com>"]
 license = "MIT"
@@ -18,4 +18,4 @@ anyhow = "1.0.70"
 libc = "0.2.141"
 prost = "0.11.9"
 termion = "2.0.1"
-sesh-proto = { path = "../proto", version = "0.1.0" }
+sesh-proto = { path = "../proto", version = "0.1.1" }

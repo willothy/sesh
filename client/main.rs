@@ -340,6 +340,7 @@ async fn start_session(
         program,
         args,
         size: Some(size),
+        pwd: std::env::current_dir()?.to_string_lossy().to_string(),
     });
     let res = client.start_session(req).await?.into_inner();
     if attach {

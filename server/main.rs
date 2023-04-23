@@ -88,7 +88,8 @@ impl Seshd {
                 program,
                 args,
                 size,
-            }) => self.exec_start(name, program, args, size).await,
+                pwd,
+            }) => self.exec_start(name, program, args, size, pwd).await,
             Command::AttachSession(SeshAttachRequest { session, size }) => {
                 self.exec_attach(session, size).await
             }

@@ -76,6 +76,7 @@ message SeshStartRequest {
 	string program = 2;
 	repeated string args = 3;
 	WinSize size = 4;
+	string pwd = 5;
 }
 
 message SeshStartResponse {
