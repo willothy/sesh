@@ -18,5 +18,17 @@ https://user-images.githubusercontent.com/38540736/233831581-c925ea27-6ec3-4bf7-
 
 ## Usage:
 
-
 See the `help` subcommand or [MANUAL.md](https://github.com/willothy/sesh/blob/main/MANUAL.md) for more info.
+
+
+## Integration:
+
+<details>
+<summary>[Starship](https://starship.rs/)</summary>
+```toml
+[custom.sesh]
+command = "echo $SESH_NAME"
+when = ''' test "$SESH_NAME" != "" '''
+format = '\(sesh [$output]($style)\)'
+```
+</details>
