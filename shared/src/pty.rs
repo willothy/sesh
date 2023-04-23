@@ -171,7 +171,7 @@ impl Pty {
                 &mut slave,
                 ptr::null_mut(),
                 ptr::null(),
-                &size.into(),
+                &mut size.into(),
             )
             .to_result()
             .context(PTY_ERR)?;
@@ -204,7 +204,7 @@ impl Pty {
             })?;
 
             // Set this process as the controling terminal
-            libc::ioctl(0, libc::TIOCSCTTY, 1)
+            libc::ioctl(0, libc::TIOCSCTTY as u64, 1)
                 .to_result()
                 .map_err(|e| {
                     io::Error::new(
