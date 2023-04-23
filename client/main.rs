@@ -112,6 +112,7 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
+use dialoguer::theme;
 use sesh_cli::{Cli, Command, SessionSelector};
 use sesh_shared::{pty::Pty, term::Size};
 use termion::{
@@ -484,6 +485,31 @@ async fn shutdown_server(mut client: SeshdClient<Channel>) -> Result<Option<Stri
     }))
 }
 
+async fn select_session(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
+    let request = tonic::Request::new(sesh_proto::SeshListRequest {});
+    let response = client.list_sessions(request).await?.into_inner();
+    let sessions = response
+        .sessions
+        .into_iter()
+        .map(|s| s.name)
+        .collect::<Vec<_>>();
+
+    let Ok(Some(select)) = dialoguer::FuzzySelect::with_theme(&theme::ColorfulTheme::default())
+        .items(sessions.as_slice())
+        .default(0)
+        .report(true)
+        .with_prompt("Session")
+        .interact_opt() else {
+            return Ok(Some(success!("[cancelled]")));
+        };
+
+    let Some(name) = sessions.get(select) else {
+        return Err(anyhow::anyhow!("Invalid selection"));
+    };
+
+    attach_session(client, SessionSelector::Name(name.clone())).await
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let Ok(_) = ctrlc::set_handler(move || unsafe {
@@ -541,6 +567,7 @@ async fn main() -> ExitCode {
         Command::Attach { session } => attach_session(client, session).await,
         Command::Kill { session } => kill_session(client, session).await,
         Command::Detach { session } => detach_session(client, session).await,
+        Command::Select => select_session(client).await,
         Command::List => list_sessions(client).await,
         Command::Shutdown => shutdown_server(client).await,
     };

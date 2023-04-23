@@ -31,8 +31,10 @@ pub enum Command {
         /// Id or name of session
         session: SessionSelector,
     },
-    /// Detach a session remotely [alias: d]
-    /// Detaches the current session, or the one specified
+    /// Fuzzy select a session to attach to [alias: f]
+    #[command(alias = "f")]
+    Select,
+    /// Detach the current session or the specified session [alias: d]
     #[command(alias = "d")]
     Detach {
         /// Id or name of session

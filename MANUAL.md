@@ -7,6 +7,7 @@ This document contains the help content for the `sesh` command-line program.
 * [`sesh`↴](#sesh)
 * [`sesh start`↴](#sesh-start)
 * [`sesh attach`↴](#sesh-attach)
+* [`sesh select`↴](#sesh-select)
 * [`sesh detach`↴](#sesh-detach)
 * [`sesh kill`↴](#sesh-kill)
 * [`sesh list`↴](#sesh-list)
@@ -20,7 +21,8 @@ This document contains the help content for the `sesh` command-line program.
 
 * `start` — Start a new session, optionally specifying a name [alias: s]
 * `attach` — Attach to a session [alias: a]
-* `detach` — Detach a session remotely [alias: d] Detaches the current session, or the one specified
+* `select` — Fuzzy select a session to attach to [alias: f]
+* `detach` — Detach the current session or the specified session [alias: d]
 * `kill` — Kill a session [alias: k]
 * `list` — List sessions [alias: ls]
 * `shutdown` — Shutdown the server (kill all sessions)
@@ -57,9 +59,17 @@ Attach to a session [alias: a]
 
 
 
+## `sesh select`
+
+Fuzzy select a session to attach to [alias: f]
+
+**Usage:** `sesh select`
+
+
+
 ## `sesh detach`
 
-Detach a session remotely [alias: d] Detaches the current session, or the one specified
+Detach the current session or the specified session [alias: d]
 
 **Usage:** `sesh detach [SESSION]`
 
