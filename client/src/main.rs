@@ -1,14 +1,13 @@
 use std::{
-    fmt::Display,
     io::{Read, Write},
     path::PathBuf,
     process::ExitCode,
-    str::FromStr,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use sesh_cli::{Cli, Command, SessionSelector};
 use sesh_shared::{pty::Pty, term::Size};
 use termion::{color, get_tty, raw::IntoRawMode, screen::IntoAlternateScreen};
 use tokio::{
@@ -53,82 +52,6 @@ macro_rules! error {
     };
 }
 
-#[derive(Debug, clap::Parser)]
-#[clap(
-    name = "sesh",
-    version = "0.1.0",
-    author = "Will Hopkins <willothyh@gmail.com>"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    #[command(alias = "s")]
-    /// Start a new session, optionally specifying a name [alias: s]
-    Start {
-        #[arg(short, long)]
-        name: Option<String>,
-        program: Option<String>,
-        args: Vec<String>,
-        #[arg(short, long)]
-        detached: bool,
-    },
-    #[command(alias = "a")]
-    /// Attach to a session [alias: a]
-    Attach {
-        /// Id or name of session
-        session: SessionSelector,
-    },
-    /// Detach a session remotely [alias: d]
-    /// Detaches the current session, or the one specified
-    #[command(alias = "d")]
-    Detach {
-        /// Id or name of session
-        session: Option<SessionSelector>,
-    },
-    #[command(alias = "k")]
-    /// Kill a session [alias: k]
-    Kill {
-        /// Id or name of session
-        session: SessionSelector,
-    },
-    /// List sessions [alias: ls]
-    #[command(alias = "ls")]
-    List,
-    /// Shutdown the server (kill all sessions)
-    Shutdown,
-}
-
-#[derive(Debug, Clone)]
-enum SessionSelector {
-    Id(usize),
-    Name(String),
-}
-
-impl Display for SessionSelector {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SessionSelector::Id(id) => write!(f, "{}", id),
-            SessionSelector::Name(name) => write!(f, "{}", name),
-        }
-    }
-}
-
-impl FromStr for SessionSelector {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Ok(id) = s.parse::<usize>() {
-            Ok(SessionSelector::Id(id))
-        } else {
-            Ok(SessionSelector::Name(s.to_owned()))
-        }
-    }
-}
-
 #[derive(Clone)]
 struct SeshCliService;
 
@@ -154,7 +77,7 @@ async fn exec_session(
     name: String,
 ) -> Result<()> {
     std::env::set_var("SESH_NAME", &name);
-    let mut tty_output = get_tty()?.into_alternate_screen()?.into_raw_mode()?;
+    let tty_output = get_tty()?.into_alternate_screen()?.into_raw_mode()?;
     tty_output.activate_raw_mode()?;
 
     let sock = PathBuf::from(&socket);
