@@ -321,6 +321,9 @@ async fn exec_session(
             // This doesn't actually kill the process, it just checks if it exists
             if libc::kill(pid, 0) == -1 {
                 // check errno
+                #[cfg(target_arch = "aarch64")]
+                let errno = *libc::__error();
+                #[cfg(not(target_arch = "aarch64"))]
                 let errno = *libc::__errno_location();
                 if errno == 3 {
                     //libc::ESRCH {
