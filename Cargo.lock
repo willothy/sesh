@@ -902,7 +902,9 @@ dependencies = [
  "clap-markdown",
  "ctrlc",
  "dirs",
+ "env_logger",
  "libc",
+ "log",
  "once_cell",
  "prost",
  "serde",
@@ -941,27 +943,6 @@ dependencies = [
  "libc",
  "prost",
  "sesh-proto",
- "termion",
- "tokio",
- "tokio-stream",
- "tonic",
- "tower",
-]
-
-[[package]]
-name = "seshd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ctrlc",
- "dirs",
- "env_logger",
- "libc",
- "log",
- "once_cell",
- "prost",
- "sesh-proto",
- "sesh-shared",
  "termion",
  "tokio",
  "tokio-stream",

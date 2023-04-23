@@ -10,11 +10,20 @@ Built on gRPC and unix sockets.
 ## Demo
 
 
-
-
 https://user-images.githubusercontent.com/38540736/233831581-c925ea27-6ec3-4bf7-bcb9-11e7b9c4d974.mp4
 
 
+## Installation
+
+### From source
+
+Release:
+
+`cargo install --locked term-sesh`
+
+Git:
+
+`cargo install --git https://github.com/willothy/sesh`
 
 ## Usage:
 

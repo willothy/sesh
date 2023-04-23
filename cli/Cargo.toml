@@ -2,6 +2,12 @@
 name = "sesh-cli"
 version = "0.1.0"
 edition = "2021"
+authors = ["Will Hopkins <willothyh@gmail.com>"]
+license = "MIT"
+description = "CLI crate for Sesh, a Unix terminal session manager"
+readme = "../README.md"
+repository = "https://github.com/willothy/sesh"
+documentation = "https://docs.rs/sesh"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
