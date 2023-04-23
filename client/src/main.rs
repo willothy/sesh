@@ -1,6 +1,6 @@
 use std::{
+    fmt::Display,
     io::{Read, Write},
-    os::unix::net::UnixListener,
     path::PathBuf,
     str::FromStr,
     sync::atomic::{AtomicBool, Ordering},
@@ -85,6 +85,15 @@ enum SessionSelector {
     Name(String),
 }
 
+impl Display for SessionSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionSelector::Id(id) => write!(f, "{}", id),
+            SessionSelector::Name(name) => write!(f, "{}", name),
+        }
+    }
+}
+
 impl FromStr for SessionSelector {
     type Err = anyhow::Error;
 
@@ -114,7 +123,7 @@ impl SeshCli for SeshCliService {
     }
 }
 
-use tonic::{transport::Server as RPCServer, Request, Response, Status};
+use tonic::transport::Server as RPCServer;
 async fn exec_session(
     client: SeshdClient<Channel>,
     pid: i32,
@@ -250,7 +259,7 @@ async fn start_session(
     program: Option<String>,
     args: Vec<String>,
     attach: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     let program = program.unwrap_or_else(|| std::env::var("SHELL").unwrap_or("sh".to_owned()));
     let size = {
         let s = termion::terminal_size()?;
@@ -269,10 +278,17 @@ async fn start_session(
     if attach {
         exec_session(client, res.pid, res.socket, res.name).await?;
     }
-    Ok(())
+    if unsafe { DETACHED.load(Ordering::Relaxed) } {
+        Ok(Some("[detached]".to_owned()))
+    } else {
+        Ok(Some("[exited]".to_owned()))
+    }
 }
 
-async fn attach_session(mut client: SeshdClient<Channel>, session: SessionSelector) -> Result<()> {
+async fn attach_session(
+    mut client: SeshdClient<Channel>,
+    session: SessionSelector,
+) -> Result<Option<String>> {
     use sesh_proto::sesh_attach_request::Session::*;
     let session = match session {
         SessionSelector::Id(id) => Id(id as u64),
@@ -291,21 +307,24 @@ async fn attach_session(mut client: SeshdClient<Channel>, session: SessionSelect
     });
     let res = client.attach_session(req).await?.into_inner();
     exec_session(client, res.pid, res.socket, res.name).await?;
-    Ok(())
+    if unsafe { DETACHED.load(Ordering::Relaxed) } {
+        Ok(Some("[detached]".to_owned()))
+    } else {
+        Ok(Some("[exited]".to_owned()))
+    }
 }
 
 async fn detach_session(
     mut client: SeshdClient<Channel>,
     session: Option<SessionSelector>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     use sesh_proto::sesh_detach_request::Session::*;
     let session = match session {
         Some(SessionSelector::Id(id)) => Id(id as u64),
         Some(SessionSelector::Name(name)) => Name(name),
         None => {
             let Ok(current) = std::env::var("SESH_NAME") else {
-                println!("No session name specified.");
-                return Ok(());
+                return Err(anyhow::anyhow!("No session name found in environment"));
             };
             Name(current)
         }
@@ -319,34 +338,37 @@ async fn detach_session(
         DETACHED.store(true, Ordering::Relaxed);
     }
 
-    Ok(())
+    Ok(None)
 }
 
-async fn kill_session(mut client: SeshdClient<Channel>, session: SessionSelector) -> Result<()> {
+async fn kill_session(
+    mut client: SeshdClient<Channel>,
+    session: SessionSelector,
+) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshKillRequest {
-        session: Some(match session {
-            SessionSelector::Id(id) => Session::Id(id as u64),
-            SessionSelector::Name(name) => Session::Name(name),
+        session: Some(match &session {
+            SessionSelector::Id(id) => Session::Id(*id as u64),
+            SessionSelector::Name(name) => Session::Name(name.clone()),
         }),
     });
     let response = client.kill_session(request).await?;
     if response.into_inner().success {
-        println!("Session killed successfully.");
+        return Ok(Some(format!("[killed {}]", session)));
     } else {
-        println!("Session not found.");
+        return Err(anyhow::anyhow!("Failed to kill session"));
     }
-    Ok(())
 }
 
-async fn list_sessions(mut client: SeshdClient<Channel>) -> Result<()> {
+async fn list_sessions(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshListRequest {});
     let response = client.list_sessions(request).await?.into_inner();
     let sessions = &response.sessions;
 
+    let mut res = String::new();
     for session in sessions.iter() {
-        println!("◦ {}: {}", session.id, session.name);
+        res += &format!("◦ {}: {}\n", session.id, session.name);
     }
-    Ok(())
+    Ok(Some(res))
 }
 
 async fn init_client(sock_path: PathBuf) -> Result<SeshdClient<Channel>> {
@@ -368,15 +390,14 @@ async fn init_client(sock_path: PathBuf) -> Result<SeshdClient<Channel>> {
     Ok(SeshdClient::new(channel))
 }
 
-async fn shutdown_server(mut client: SeshdClient<Channel>) -> Result<()> {
+async fn shutdown_server(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::ShutdownServerRequest {});
     let response = client.shutdown_server(request).await?;
-    if response.into_inner().success {
-        println!("Server shutdown successfully.");
+    Ok(Some(if response.into_inner().success {
+        "[shutdown]".to_owned()
     } else {
-        println!("Server shutdown failed.");
-    }
-    Ok(())
+        return Err(anyhow::anyhow!("Failed to shutdown server"));
+    }))
 }
 
 #[tokio::main]
@@ -414,39 +435,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = init_client(server_sock).await?;
 
-    match cmd {
+    let message = match cmd {
         Command::Start {
             name,
             program,
             args,
             detached,
-        } => {
-            start_session(client, name, program, args, !detached).await?;
-        }
-        Command::Attach { session } => {
-            attach_session(client, session).await?;
-        }
-        Command::Detach { session } => {
-            detach_session(client, session).await?;
-            return Ok(());
-        }
-        Command::Kill { session } => {
-            kill_session(client, session).await?;
-            return Ok(());
-        }
-        Command::List => {
-            list_sessions(client).await?;
-            return Ok(());
-        }
-        Command::Shutdown => {
-            shutdown_server(client).await?;
-            return Ok(());
-        }
+        } => start_session(client, name, program, args, !detached).await?,
+        Command::Attach { session } => attach_session(client, session).await?,
+        Command::Kill { session } => kill_session(client, session).await?,
+        Command::Detach { session } => detach_session(client, session).await?,
+        Command::List => list_sessions(client).await?,
+        Command::Shutdown => shutdown_server(client).await?,
     };
-    if unsafe { DETACHED.load(Ordering::Relaxed) } {
-        println!("[detached]");
-    } else {
-        println!("[exited]");
+    if let Some(res) = message {
+        println!("{}", res);
     }
 
     // TODO: exit more cleanly
