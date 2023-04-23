@@ -410,6 +410,7 @@ impl Seshd {
                         id: session.id as u64,
                         name: name.clone(),
                         program: session.program.clone(),
+                        connected: session.connected.load(Ordering::Relaxed),
                     })
                     .collect::<Vec<_>>();
                 if sessions.is_empty() {

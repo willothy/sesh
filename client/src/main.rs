@@ -9,7 +9,13 @@ use anyhow::Result;
 use clap::Parser;
 use sesh_cli::{Cli, Command, SessionSelector};
 use sesh_shared::{pty::Pty, term::Size};
-use termion::{color, get_tty, raw::IntoRawMode, screen::IntoAlternateScreen};
+use termion::{
+    color::{self, Fg},
+    get_tty,
+    raw::IntoRawMode,
+    screen::IntoAlternateScreen,
+    style::Bold,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -310,7 +316,7 @@ async fn kill_session(
     });
     let response = client.kill_session(request).await?;
     if response.into_inner().success {
-        return Ok(Some(format!("[killed {}]", session)));
+        return Ok(Some(success!("[killed {}]", session)));
     } else {
         return Err(anyhow::anyhow!("{}", error!("Could not kill process")));
     }
@@ -326,7 +332,20 @@ async fn list_sessions(mut client: SeshdClient<Channel>) -> Result<Option<String
         if i > 0 {
             res += "\n";
         }
-        res += &format!("◦ {}: {}", session.id, session.name);
+        let bullets = ["❒", "።", "⯌", "●"];
+        let bullet = if session.connected {
+            success!("{}{}", Bold, bullets[0])
+        } else {
+            format!("{}{}", Bold, bullets[0])
+        };
+        res += &format!(
+            "{} {col}{}{reset} \u{2218} {}",
+            bullet,
+            session.id,
+            session.name,
+            col = Fg(color::LightBlue),
+            reset = Fg(color::Reset)
+        );
     }
     Ok(Some(res))
 }
