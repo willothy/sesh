@@ -1,5 +1,13 @@
 use sesh_proto::*;
 
+mod attach;
+mod detach;
+mod kill;
+mod list;
+mod resize;
+mod shutdown;
+mod start;
+
 #[derive(Debug)]
 pub enum Command {
     StartSession(SeshStartRequest),
