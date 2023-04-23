@@ -27,6 +27,10 @@ jobs:
             artifact_name: target/release/<name>
             asset_name: <name>-macos
     steps:
+      - name: Apt update
+        run: sudo apt update
+      - name: Install Protobuf
+        run: sudo apt install protobuf-compiler
       - uses: actions/checkout@v1
       - uses: actions-rs/toolchain@v1
         with:
