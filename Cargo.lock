@@ -894,31 +894,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sesh"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "clap-markdown",
- "ctrlc",
- "dirs",
- "env_logger",
- "libc",
- "log",
- "once_cell",
- "prost",
- "serde",
- "sesh-cli",
- "sesh-proto",
- "sesh-shared",
- "termion",
- "tokio",
- "tokio-stream",
- "tonic",
- "tower",
-]
-
-[[package]]
 name = "sesh-cli"
 version = "0.1.0"
 dependencies = [
@@ -1029,6 +1004,31 @@ dependencies = [
  "redox_syscall 0.3.5",
  "rustix",
  "windows-sys 0.45.0",
+]
+
+[[package]]
+name = "term-sesh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap-markdown",
+ "ctrlc",
+ "dirs",
+ "env_logger",
+ "libc",
+ "log",
+ "once_cell",
+ "prost",
+ "serde",
+ "sesh-cli",
+ "sesh-proto",
+ "sesh-shared",
+ "termion",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower",
 ]
 
 [[package]]
