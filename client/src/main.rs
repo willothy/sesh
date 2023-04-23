@@ -2,6 +2,7 @@ use std::{
     fmt::Display,
     io::{Read, Write},
     path::PathBuf,
+    process::ExitCode,
     str::FromStr,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -9,7 +10,7 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use sesh_shared::{pty::Pty, term::Size};
-use termion::{get_tty, raw::IntoRawMode, screen::IntoAlternateScreen};
+use termion::{color, get_tty, raw::IntoRawMode, screen::IntoAlternateScreen};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -29,6 +30,28 @@ use sesh_proto::{
 
 static mut EXIT: AtomicBool = AtomicBool::new(false);
 static mut DETACHED: AtomicBool = AtomicBool::new(false);
+
+macro_rules! success {
+    ($($arg:tt)*) => {
+        format!(
+            "{}{}{}",
+            color::Fg(color::Green),
+            format!($($arg)*),
+            color::Fg(color::Reset)
+        )
+    };
+}
+
+macro_rules! error {
+    ($($arg:expr),*) => {
+        format!(
+            "{}{}{}",
+            color::Fg(color::Red),
+            format!($($arg),*),
+            color::Fg(color::Reset)
+        )
+    };
+}
 
 #[derive(Debug, clap::Parser)]
 #[clap(
@@ -279,9 +302,11 @@ async fn start_session(
         exec_session(client, res.pid, res.socket, res.name).await?;
     }
     if unsafe { DETACHED.load(Ordering::Relaxed) } {
-        Ok(Some("[detached]".to_owned()))
+        Ok(Some(success!("[detached]")))
+    } else if !attach {
+        Ok(Some(success!("[started]")))
     } else {
-        Ok(Some("[exited]".to_owned()))
+        Ok(Some(success!("[exited]")))
     }
 }
 
@@ -308,9 +333,9 @@ async fn attach_session(
     let res = client.attach_session(req).await?.into_inner();
     exec_session(client, res.pid, res.socket, res.name).await?;
     if unsafe { DETACHED.load(Ordering::Relaxed) } {
-        Ok(Some("[detached]".to_owned()))
+        Ok(Some(success!("[detached]")))
     } else {
-        Ok(Some("[exited]".to_owned()))
+        Ok(Some(success!("[exited]")))
     }
 }
 
@@ -355,7 +380,7 @@ async fn kill_session(
     if response.into_inner().success {
         return Ok(Some(format!("[killed {}]", session)));
     } else {
-        return Err(anyhow::anyhow!("Failed to kill session"));
+        return Err(anyhow::anyhow!("{}", error!("Could not kill process")));
     }
 }
 
@@ -365,8 +390,11 @@ async fn list_sessions(mut client: SeshdClient<Channel>) -> Result<Option<String
     let sessions = &response.sessions;
 
     let mut res = String::new();
-    for session in sessions.iter() {
-        res += &format!("◦ {}: {}\n", session.id, session.name);
+    for (i, session) in sessions.iter().enumerate() {
+        if i > 0 {
+            res += "\n";
+        }
+        res += &format!("◦ {}: {}", session.id, session.name);
     }
     Ok(Some(res))
 }
@@ -394,17 +422,20 @@ async fn shutdown_server(mut client: SeshdClient<Channel>) -> Result<Option<Stri
     let request = tonic::Request::new(sesh_proto::ShutdownServerRequest {});
     let response = client.shutdown_server(request).await?;
     Ok(Some(if response.into_inner().success {
-        "[shutdown]".to_owned()
+        success!("[shutdown]")
     } else {
         return Err(anyhow::anyhow!("Failed to shutdown server"));
     }))
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ctrlc::set_handler(move || unsafe {
+async fn main() -> ExitCode {
+    let Ok(_) = ctrlc::set_handler(move || unsafe {
         EXIT.store(true, Ordering::Relaxed);
-    })?;
+    }) else {
+        eprintln!("{}", error!("[failed to set ctrl-c handler]"));
+        return ExitCode::FAILURE;
+    };
     let args = Cli::parse();
 
     let rt = dirs::runtime_dir()
@@ -421,19 +452,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || matches!(cmd, Command::List)
             || matches!(cmd, Command::Kill { .. })
         {
-            println!("Server not running.");
-            return Ok(());
-        }
-        Pty::new(&std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()))
-            .daemonize()
-            .env("RUST_LOG", "INFO")
-            .spawn(&Size::term_size()?)?;
-        while !server_sock.exists() {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            println!("{}", error!("[not running]"));
+            return ExitCode::FAILURE;
+        } else {
+            let Ok(size) = Size::term_size() else {
+                return ExitCode::FAILURE;
+            };
+            let Ok(_) = Pty::new(&std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()))
+                .daemonize()
+                .env("RUST_LOG", "INFO")
+                .spawn(&size) else {
+                    return ExitCode::FAILURE;
+                };
+            while !server_sock.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     }
 
-    let client = init_client(server_sock).await?;
+    let Ok(client) = init_client(server_sock).await else {
+        eprintln!("{}", error!("[failed to connect to server]"));
+        return ExitCode::FAILURE;
+    };
 
     let message = match cmd {
         Command::Start {
@@ -441,15 +481,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             program,
             args,
             detached,
-        } => start_session(client, name, program, args, !detached).await?,
-        Command::Attach { session } => attach_session(client, session).await?,
-        Command::Kill { session } => kill_session(client, session).await?,
-        Command::Detach { session } => detach_session(client, session).await?,
-        Command::List => list_sessions(client).await?,
-        Command::Shutdown => shutdown_server(client).await?,
+        } => start_session(client, name, program, args, !detached).await,
+        Command::Attach { session } => attach_session(client, session).await,
+        Command::Kill { session } => kill_session(client, session).await,
+        Command::Detach { session } => detach_session(client, session).await,
+        Command::List => list_sessions(client).await,
+        Command::Shutdown => shutdown_server(client).await,
     };
-    if let Some(res) = message {
-        println!("{}", res);
+
+    match message {
+        Ok(Some(message)) => println!("{}", message),
+        Ok(None) => (),
+        Err(e) => {
+            println!("{}", error!("{}", e));
+            return ExitCode::FAILURE;
+        }
     }
 
     // TODO: exit more cleanly
