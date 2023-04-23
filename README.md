@@ -33,11 +33,13 @@ See the `help` subcommand or [MANUAL.md](https://github.com/willothy/sesh/blob/m
 ## Integration:
 
 <details>
-<summary>[Starship](https://starship.rs/)</summary>
+<summary><a href="https://starship.rs/">Starship</a></summary>
+
 ```toml
 [custom.sesh]
 command = "echo $SESH_NAME"
 when = ''' test "$SESH_NAME" != "" '''
 format = '\(sesh [$output]($style)\)'
 ```
+
 </details>
