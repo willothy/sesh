@@ -170,7 +170,7 @@ impl Pty {
                 &mut master,
                 &mut slave,
                 ptr::null_mut(),
-                ptr::null(),
+                ptr::null_mut(),
                 &mut size.into(),
             )
             .to_result()
