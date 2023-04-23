@@ -337,12 +337,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_sock = rt.join("server.sock");
 
     if !server_sock.exists() {
-        let mut pty = Pty::spawn(
-            &std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()),
-            vec![],
-            &Size::term_size()?,
-        )?;
-        pty.daemonize();
+        Pty::new(&std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()))
+            .daemonize()
+            .env("RUST_LOG", "INFO")
+            .spawn(&Size::term_size()?)?;
         while !server_sock.exists() {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }

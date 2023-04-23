@@ -89,6 +89,7 @@ impl PtyBuilder {
         let (master, slave) = Pty::open(size)?;
 
         let mut cmd = self.inner;
+
         cmd.stdin(unsafe { Stdio::from_raw_fd(slave) })
             .stdout(unsafe { Stdio::from_raw_fd(slave) })
             .stderr(unsafe { Stdio::from_raw_fd(slave) });
