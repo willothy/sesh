@@ -161,7 +161,7 @@ impl Pty {
 
     /// Creates a pty with the given size and returns the (master, slave)
     /// file descriptors attached to it.
-    fn open(size: &Size) -> Result<(RawFd, RawFd)> {
+    pub fn open(size: &Size) -> Result<(RawFd, RawFd)> {
         let mut master = 0;
         let mut slave = 0;
 
@@ -192,6 +192,9 @@ impl Pty {
     // Runs between fork and exec calls
     fn pre_exec() -> io::Result<()> {
         unsafe {
+            if libc::getpid() == 0 {
+                std::process::exit(0);
+            }
             // Create a new process group, this process being the master
             libc::setsid().to_result().map_err(|e| {
                 io::Error::new(

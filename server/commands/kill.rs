@@ -31,7 +31,7 @@ impl Seshd {
             } else {
                 false
             };
-            if sessions.is_empty() {
+            if sessions.is_empty() && crate::EXIT_ON_EMPTY {
                 self.exit_signal.send(())?;
             }
             Ok(CommandResponse::KillSession(SeshKillResponse { success }))

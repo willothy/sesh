@@ -22,6 +22,8 @@ mod rpc;
 mod session;
 use commands::{Command, CommandResponse};
 
+pub const EXIT_ON_EMPTY: bool = true;
+
 #[derive(Clone)]
 struct Seshd {
     // TODO: Do I need to queue events?
@@ -59,7 +61,7 @@ impl Seshd {
                     for name in to_remove {
                         sessions.remove(&name);
                     }
-                    if sessions.is_empty() {
+                    if sessions.is_empty() && EXIT_ON_EMPTY {
                         exit.send(())?;
                     }
                     // TODO: Use a less hacky method of reducing CPU usage

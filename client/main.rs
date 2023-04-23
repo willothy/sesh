@@ -110,9 +110,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use dialoguer::theme;
+use libc::exit;
 use sesh_cli::{Cli, Command, SessionSelector};
 use sesh_shared::{pty::Pty, term::Size};
 use termion::{
@@ -189,23 +190,34 @@ async fn exec_session(
     name: String,
 ) -> Result<()> {
     std::env::set_var("SESH_NAME", &name);
-    let tty_output = get_tty()?.into_alternate_screen()?.into_raw_mode()?;
-    tty_output.activate_raw_mode()?;
+    let tty_output = get_tty()
+        .context("Failed to get tty")?
+        .into_raw_mode()
+        .context("Failed to set raw mode")?
+        .into_alternate_screen()
+        .context("Failed to enter alternate screen")?;
+    let mut tty_input = tty_output.try_clone()?;
 
     let sock = PathBuf::from(&socket);
     let sock_dir = sock
         .parent()
         .ok_or(anyhow::anyhow!("Could not get runtime dir"))?;
     let client_server_sock = sock_dir.join(format!("client-{}.sock", pid));
-    let uds = tokio::net::UnixListener::bind(&client_server_sock)?;
+    let uds = tokio::net::UnixListener::bind(&client_server_sock).context(format!(
+        "Failed to bind listener to {}",
+        &client_server_sock.display()
+    ))?;
     let uds_stream = UnixListenerStream::new(uds);
 
-    let mut tty_input = tty_output.try_clone()?;
-
-    let (mut r_stream, mut w_stream) = UnixStream::connect(&socket).await?.into_split();
+    let (mut r_stream, mut w_stream) = UnixStream::connect(&socket)
+        .await
+        .context("Could not connect to socket stream")?
+        .into_split();
 
     let r_handle = tokio::task::spawn({
-        let mut tty_output = tty_output.try_clone()?;
+        let mut tty_output = tty_output
+            .try_clone()
+            .context("Could not clone tty_output")?;
         async move {
             while unsafe { EXIT.load(Ordering::Relaxed) } == false {
                 let mut packet = [0; 4096];
@@ -215,8 +227,10 @@ async fn exec_session(
                     break;
                 }
                 let read = &packet[..nbytes];
-                tty_output.write_all(&read)?;
-                tty_output.flush()?;
+                tty_output
+                    .write_all(&read)
+                    .context("Could not write tty_output")?;
+                tty_output.flush().context("Could not flush tty_output")?;
                 // TODO: Use a less hacky method of reducing CPU usage
                 tokio::time::sleep(tokio::time::Duration::from_nanos(200)).await;
             }
@@ -230,7 +244,9 @@ async fn exec_session(
             while unsafe { EXIT.load(Ordering::Relaxed) } == false {
                 let mut packet = [0; 4096];
 
-                let nbytes = tty_input.read(&mut packet)?;
+                let nbytes = tty_input
+                    .read(&mut packet)
+                    .context("Failed to read tty_input")?;
                 if nbytes == 0 {
                     break;
                 }
@@ -244,8 +260,11 @@ async fn exec_session(
                     break;
                 }
 
-                w_stream.write_all(&read).await?;
-                w_stream.flush().await?;
+                w_stream
+                    .write_all(&read)
+                    .await
+                    .context("Failed to write to w_stream")?;
+                w_stream.flush().await.context("Failed to flush w_stream")?;
                 // TODO: Use a less hacky method of reducing CPU usage
                 // tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
             }
@@ -274,10 +293,12 @@ async fn exec_session(
         let name = name.clone();
         let mut client = client.clone();
         async move {
+            let mut signal =
+                signal(SignalKind::window_change()).context("Could not read SIGWINCH")?;
             while unsafe { EXIT.load(Ordering::Relaxed) } == false {
-                signal(SignalKind::window_change())?.recv().await;
+                signal.recv().await;
                 let size = {
-                    let s = termion::terminal_size()?;
+                    let s = termion::terminal_size().unwrap_or((80, 24));
                     WinSize {
                         rows: s.1 as u32,
                         cols: s.0 as u32,
@@ -288,7 +309,8 @@ async fn exec_session(
                         size: Some(size),
                         session: Some(sesh_resize_request::Session::Name(name.clone())),
                     })
-                    .await?;
+                    .await
+                    .context("Failed to resize")?;
             }
             Result::<_, anyhow::Error>::Ok(())
         }
@@ -327,9 +349,9 @@ async fn start_session(
     args: Vec<String>,
     attach: bool,
 ) -> anyhow::Result<Option<String>> {
-    let program = program.unwrap_or_else(|| std::env::var("SHELL").unwrap_or("sh".to_owned()));
+    let program = program.unwrap_or_else(|| std::env::var("SHELL").unwrap_or("bash".to_owned()));
     let size = {
-        let s = termion::terminal_size()?;
+        let s = termion::terminal_size().unwrap_or((80, 24));
         WinSize {
             rows: s.1 as u32,
             cols: s.0 as u32,
@@ -342,7 +364,11 @@ async fn start_session(
         size: Some(size),
         pwd: std::env::current_dir()?.to_string_lossy().to_string(),
     });
-    let res = client.start_session(req).await?.into_inner();
+    let res = client
+        .start_session(req)
+        .await
+        .context("Could not start session")?
+        .into_inner();
     if attach {
         exec_session(client, res.pid, res.socket, res.name).await?;
     }
@@ -365,7 +391,7 @@ async fn attach_session(
         SessionSelector::Name(name) => Name(name),
     };
     let size = {
-        let s = termion::terminal_size()?;
+        let s = termion::terminal_size().unwrap_or((80, 24));
         WinSize {
             rows: s.1 as u32,
             cols: s.0 as u32,
@@ -375,7 +401,11 @@ async fn attach_session(
         session: Some(session),
         size: Some(size),
     });
-    let res = client.attach_session(req).await?.into_inner();
+    let res = client
+        .attach_session(req)
+        .await
+        .context("Could not attach session")?
+        .into_inner();
     exec_session(client, res.pid, res.socket, res.name).await?;
     if unsafe { DETACHED.load(Ordering::Relaxed) } {
         Ok(Some(success!("[detached]")))
@@ -543,15 +573,19 @@ async fn main() -> ExitCode {
             println!("{}", error!("[not running]"));
             return ExitCode::FAILURE;
         } else {
-            let Ok(size) = Size::term_size() else {
-                return ExitCode::FAILURE;
-            };
-            let Ok(_) = Pty::new(&std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()))
-                .daemonize()
-                .env("RUST_LOG", "INFO")
-                .spawn(&size) else {
-                    return ExitCode::FAILURE;
-                };
+            let size = Size::term_size().unwrap_or(Size { cols: 80, rows: 24 });
+            if unsafe { libc::fork() == 0 } {
+                let res = Pty::new(&std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()))
+                    .daemonize()
+                    .env("RUST_LOG", "INFO")
+                    .spawn(&size);
+                unsafe {
+                    match res {
+                        Ok(_) => exit(0),
+                        Err(_) => exit(1),
+                    }
+                }
+            }
             while !server_sock.exists() {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
@@ -587,6 +621,5 @@ async fn main() -> ExitCode {
         }
     }
 
-    // TODO: exit more cleanly
-    std::process::exit(0);
+    unsafe { exit(0) };
 }
