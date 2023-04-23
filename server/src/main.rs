@@ -13,18 +13,24 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixListener,
+    net::{UnixListener, UnixStream},
     signal::unix::{signal, SignalKind},
     sync::{mpsc::UnboundedSender, Mutex},
 };
 use tokio_stream::wrappers::UnixListenerStream;
-use tonic::{transport::Server as RPCServer, Request, Response, Status};
+use tonic::{
+    transport::{Endpoint, Server as RPCServer, Uri},
+    Request, Response, Status,
+};
+use tower::service_fn;
 
 use sesh_proto::{
-    sesh_server::{Sesh as RPCDefs, SeshServer},
-    SeshAttachRequest, SeshAttachResponse, SeshDetachRequest, SeshDetachResponse, SeshKillRequest,
-    SeshKillResponse, SeshListResponse, SeshResizeRequest, SeshResizeResponse, SeshStartRequest,
-    SeshStartResponse, ShutdownServerRequest, ShutdownServerResponse,
+    sesh_cli_client::SeshCliClient,
+    seshd_server::{Seshd as RPCDefs, SeshdServer},
+    ClientDetachRequest, SeshAttachRequest, SeshAttachResponse, SeshDetachRequest,
+    SeshDetachResponse, SeshKillRequest, SeshKillResponse, SeshListResponse, SeshResizeRequest,
+    SeshResizeResponse, SeshStartRequest, SeshStartResponse, ShutdownServerRequest,
+    ShutdownServerResponse,
 };
 
 mod commands;
@@ -128,7 +134,7 @@ impl Session {
                     if o_count == 0 {
                         connected.store(false, Ordering::Relaxed);
                         w_handle.abort();
-                        pty.flush().await?;
+                        // pty.flush().await?;
                         break;
                     }
                     trace!(target: "session", "Read {} bytes from socket", o_count);
@@ -149,6 +155,21 @@ impl Session {
 
     async fn detach(&self) -> Result<()> {
         self.connected.store(false, Ordering::Relaxed);
+        let parent = self
+            .sock_path
+            .parent()
+            .ok_or(anyhow::anyhow!("No parent"))?;
+        let client_sock_path = parent.join(format!("client-{}.sock", self.pid()));
+
+        let channel = Endpoint::try_from("http://[::]:50051")?
+            .connect_with_connector(service_fn(move |_: Uri| {
+                UnixStream::connect(client_sock_path.clone())
+            }))
+            .await?;
+        let mut client = SeshCliClient::new(channel);
+
+        client.detach(ClientDetachRequest {}).await?;
+
         Ok(())
     }
 }
@@ -161,7 +182,7 @@ impl Drop for Session {
 }
 
 #[derive(Clone)]
-struct Sesh {
+struct Seshd {
     // TODO: Do I need to queue events?
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     exit_signal: UnboundedSender<()>,
@@ -169,7 +190,7 @@ struct Sesh {
 }
 
 #[tonic::async_trait]
-impl RPCDefs for Sesh {
+impl RPCDefs for Seshd {
     async fn start_session(
         &self,
         request: Request<SeshStartRequest>,
@@ -300,7 +321,7 @@ impl RPCDefs for Sesh {
     }
 }
 
-impl Sesh {
+impl Seshd {
     fn new(exit_signal: UnboundedSender<()>, runtime_dir: PathBuf) -> Result<Self> {
         let sessions = Arc::new(Mutex::new(HashMap::<String, Session>::new()));
         // Handle process exits
@@ -531,7 +552,9 @@ impl Sesh {
 
                     if let Some(name) = name {
                         if let Some(session) = sessions.get(&name) {
+                            info!(target: &session.log_group(), "Detaching");
                             session.detach().await?;
+                            info!(target: &session.log_group(), "Detached");
                         }
                     }
                 }
@@ -626,7 +649,7 @@ async fn main() -> Result<()> {
     // Initialize the Tonic gRPC server
     info!(target: "init", "Setting up RPC server");
     RPCServer::builder()
-        .add_service(SeshServer::new(Sesh::new(exit_tx, runtime_dir)?))
+        .add_service(SeshdServer::new(Seshd::new(exit_tx, runtime_dir)?))
         // .serve_with_incoming(uds_stream)
         .serve_with_incoming_shutdown(uds_stream, async move {
             exit_rx.recv().await;

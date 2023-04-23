@@ -1,7 +1,7 @@
 syntax = "proto3";
 package sesh;
 
-service Sesh {
+service Seshd {
 	// Sessions
 	rpc StartSession (SeshStartRequest) returns (SeshStartResponse);
 	rpc KillSession (SeshKillRequest) returns (SeshKillResponse);
@@ -17,6 +17,13 @@ service Sesh {
 	// Server
 	rpc ShutdownServer (ShutdownServerRequest) returns (ShutdownServerResponse);
 }
+
+service SeshCLI {
+	rpc Detach (ClientDetachRequest) returns (ClientDetachResponse);
+}
+
+message ClientDetachRequest {}
+message ClientDetachResponse {}
 
 message SeshResizeRequest {
 	oneof session {
