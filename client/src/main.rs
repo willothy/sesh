@@ -165,37 +165,28 @@ async fn exec_session(
     let uds = tokio::net::UnixListener::bind(&client_server_sock)?;
     let uds_stream = UnixListenerStream::new(uds);
 
-    tokio::task::spawn(async move {
-        RPCServer::builder()
-            .add_service(SeshCliServer::new(SeshCliService))
-            .serve_with_incoming_shutdown(uds_stream, async move {
-                while unsafe { EXIT.load(Ordering::Relaxed) } == false {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-                }
-            })
-            .await?;
-        Result::<_, anyhow::Error>::Ok(())
-    });
-
     let mut tty_input = tty_output.try_clone()?;
 
     let (mut r_stream, mut w_stream) = UnixStream::connect(&socket).await?.into_split();
 
-    let r_handle = tokio::task::spawn(async move {
-        while unsafe { EXIT.load(Ordering::Relaxed) } == false {
-            let mut packet = [0; 4096];
+    let r_handle = tokio::task::spawn({
+        let mut tty_output = tty_output.try_clone()?;
+        async move {
+            while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+                let mut packet = [0; 4096];
 
-            let nbytes = r_stream.read(&mut packet).await?;
-            if nbytes == 0 {
-                break;
+                let nbytes = r_stream.read(&mut packet).await?;
+                if nbytes == 0 {
+                    break;
+                }
+                let read = &packet[..nbytes];
+                tty_output.write_all(&read)?;
+                tty_output.flush()?;
+                // TODO: Use a less hacky method of reducing CPU usage
+                tokio::time::sleep(tokio::time::Duration::from_nanos(200)).await;
             }
-            let read = &packet[..nbytes];
-            tty_output.write_all(&read)?;
-            tty_output.flush()?;
-            // TODO: Use a less hacky method of reducing CPU usage
-            tokio::time::sleep(tokio::time::Duration::from_nanos(200)).await;
+            Result::<_, anyhow::Error>::Ok(())
         }
-        Result::<_, anyhow::Error>::Ok(())
     });
     let w_handle = tokio::task::spawn({
         let client = client.clone();
@@ -223,6 +214,23 @@ async fn exec_session(
                 // TODO: Use a less hacky method of reducing CPU usage
                 // tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
             }
+            Result::<_, anyhow::Error>::Ok(())
+        }
+    });
+    let w_abort_handle = w_handle.abort_handle();
+
+    tokio::task::spawn({
+        // let mut tty_output = tty_output.try_clone()?;
+        async move {
+            RPCServer::builder()
+                .add_service(SeshCliServer::new(SeshCliService))
+                .serve_with_incoming_shutdown(uds_stream, async move {
+                    while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                    }
+                })
+                .await?;
+            w_abort_handle.abort();
             Result::<_, anyhow::Error>::Ok(())
         }
     });
@@ -272,7 +280,8 @@ async fn exec_session(
     tokio::fs::remove_file(&client_server_sock).await?;
     // the write handle will block if it's not aborted
     w_handle.abort();
-    r_handle.await??;
+    // r_handle.await??;
+    r_handle.abort();
     Ok(())
 }
 
