@@ -5,6 +5,7 @@ This document contains the help content for the `sesh` command-line program.
 **Command Overview:**
 
 * [`sesh`↴](#sesh)
+* [`sesh resume`↴](#sesh-resume)
 * [`sesh start`↴](#sesh-start)
 * [`sesh attach`↴](#sesh-attach)
 * [`sesh select`↴](#sesh-select)
@@ -19,6 +20,7 @@ This document contains the help content for the `sesh` command-line program.
 
 ###### **Subcommands:**
 
+* `resume` — Resume the last used session [alias: r]
 * `start` — Start a new session, optionally specifying a name [alias: s]
 * `attach` — Attach to a session [alias: a]
 * `select` — Fuzzy select a session to attach to [alias: f]
@@ -36,6 +38,14 @@ This document contains the help content for the `sesh` command-line program.
 
 * `-n`, `--name <NAME>`
 * `-d`, `--detached`
+
+
+
+## `sesh resume`
+
+Resume the last used session [alias: r]
+
+**Usage:** `sesh resume`
 
 
 

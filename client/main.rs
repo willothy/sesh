@@ -5,6 +5,7 @@
 //! **Command Overview:**
 //!
 //! * [`sesh`↴](#sesh)
+//! * [`sesh resume`↴](#sesh-resume)
 //! * [`sesh start`↴](#sesh-start)
 //! * [`sesh attach`↴](#sesh-attach)
 //! * [`sesh select`↴](#sesh-select)
@@ -15,10 +16,11 @@
 //!
 //! ## `sesh`
 //!
-//! **Usage:** `sesh [COMMAND]`
+//! **Usage:** `sesh [OPTIONS] [PROGRAM] [ARGS]... [COMMAND]`
 //!
 //! ###### **Subcommands:**
 //!
+//! * `resume` — Resume the last used session [alias: r]
 //! * `start` — Start a new session, optionally specifying a name [alias: s]
 //! * `attach` — Attach to a session [alias: a]
 //! * `select` — Fuzzy select a session to attach to [alias: f]
@@ -26,6 +28,24 @@
 //! * `kill` — Kill a session [alias: k]
 //! * `list` — List sessions [alias: ls]
 //! * `shutdown` — Shutdown the server (kill all sessions)
+//!
+//! ###### **Arguments:**
+//!
+//! * `<PROGRAM>`
+//! * `<ARGS>`
+//!
+//! ###### **Options:**
+//!
+//! * `-n`, `--name <NAME>`
+//! * `-d`, `--detached`
+//!
+//!
+//!
+//! ## `sesh resume`
+//!
+//! Resume the last used session [alias: r]
+//!
+//! **Usage:** `sesh resume`
 //!
 //!
 //!
@@ -106,6 +126,10 @@
 //! ## `sesh shutdown`
 //!
 //! Shutdown the server (kill all sessions)
+//!
+//! **Usage:** `sesh shutdown`
+//!
+//!
 //!
 //! <hr/>
 
@@ -651,6 +675,18 @@ async fn select_session(mut client: SeshdClient<Channel>) -> Result<Option<Strin
     attach_session(client, SessionSelector::Name(name.clone())).await
 }
 
+async fn resume_session(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
+    let request = tonic::Request::new(sesh_proto::SeshListRequest {});
+    let mut sessions = client.list_sessions(request).await?.into_inner().sessions;
+    sessions.sort_by(|a, b| a.attach_time.cmp(&b.attach_time));
+    let session = sessions
+        .into_iter()
+        // .filter(|s| s.attach_time.is_some())
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("No sessions to resume"))?;
+    attach_session(client, SessionSelector::Name(session.name)).await
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let Ok(_) = ctrlc::set_handler(move || unsafe {
@@ -714,6 +750,7 @@ async fn main() -> ExitCode {
             args,
             detached,
         } => start_session(client, name, program, args, !detached).await,
+        Command::Resume => resume_session(client).await,
         Command::Attach { session } => attach_session(client, session).await,
         Command::Kill { session } => kill_session(client, session).await,
         Command::Detach { session } => detach_session(client, session).await,

@@ -28,6 +28,9 @@ pub struct CliArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(alias = "r")]
+    /// Resume the last used session [alias: r]
+    Resume,
     #[command(alias = "s")]
     /// Start a new session, optionally specifying a name [alias: s]
     Start {
