@@ -576,8 +576,8 @@ async fn list_sessions(mut client: SeshdClient<Channel>, table: bool) -> Result<
                 ),
                 format!("{}{}{reset}", s.name, connected, reset = Fg(color::Reset)),
                 s_time.format("%m/%d/%g \u{2218} %I:%M%P"),
-                if let Some(attached) = s.attach_time {
-                    match Local.timestamp_millis_opt(attached) {
+                if s.attach_time > 0 {
+                    match Local.timestamp_millis_opt(s.attach_time) {
                         chrono::LocalResult::None => "Unknown".to_owned(),
                         chrono::LocalResult::Single(a_time)
                         | chrono::LocalResult::Ambiguous(a_time, _) => {

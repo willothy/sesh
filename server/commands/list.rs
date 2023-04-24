@@ -19,14 +19,7 @@ impl Seshd {
                 name: name.clone(),
                 program: session.program.clone(),
                 connected: session.info.connected().load(Ordering::Relaxed),
-                attach_time: {
-                    let time = session.info.attach_time.load(Ordering::Relaxed);
-                    if time == 0 {
-                        None
-                    } else {
-                        Some(time)
-                    }
-                },
+                attach_time: session.info.attach_time.load(Ordering::Relaxed),
                 start_time: session.info.start_time,
                 socket: session.info.sock_path().to_string_lossy().to_string(),
             })

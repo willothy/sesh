@@ -105,7 +105,7 @@ message SeshInfo {
 	string socket = 4;
 	bool connected = 5;
 	int64 start_time = 6;
-	optional int64 attach_time = 7;
+	int64 attach_time = 7;
 }
 
 message SeshListResponse {
