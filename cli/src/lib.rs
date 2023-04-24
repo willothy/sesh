@@ -1,6 +1,6 @@
 use std::{fmt::Display, str::FromStr};
 
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 
 #[derive(Debug, clap::Parser)]
 #[clap(
@@ -8,9 +8,22 @@ use clap::Subcommand;
     version = "0.1.0",
     author = "Will Hopkins <willothyh@gmail.com>"
 )]
+#[group(required = false, multiple = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+    #[command(flatten)]
+    pub args: CliArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CliArgs {
+    pub program: Option<String>,
+    pub args: Vec<String>,
+    #[arg(short, long)]
+    pub name: Option<String>,
+    #[arg(short, long)]
+    pub detached: bool,
 }
 
 #[derive(Debug, Subcommand)]

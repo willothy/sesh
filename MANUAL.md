@@ -15,7 +15,7 @@ This document contains the help content for the `sesh` command-line program.
 
 ## `sesh`
 
-**Usage:** `sesh [COMMAND]`
+**Usage:** `sesh [OPTIONS] [PROGRAM] [ARGS]... [COMMAND]`
 
 ###### **Subcommands:**
 
@@ -26,6 +26,16 @@ This document contains the help content for the `sesh` command-line program.
 * `kill` — Kill a session [alias: k]
 * `list` — List sessions [alias: ls]
 * `shutdown` — Shutdown the server (kill all sessions)
+
+###### **Arguments:**
+
+* `<PROGRAM>`
+* `<ARGS>`
+
+###### **Options:**
+
+* `-n`, `--name <NAME>`
+* `-d`, `--detached`
 
 
 

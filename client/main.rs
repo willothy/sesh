@@ -659,20 +659,20 @@ async fn main() -> ExitCode {
         eprintln!("{}", error!("[failed to set ctrl-c handler]"));
         return ExitCode::FAILURE;
     };
-    let args = Cli::parse();
+    let cli = Cli::parse();
 
     let rt = dirs::runtime_dir()
         .unwrap_or(PathBuf::from("/tmp/"))
         .join("sesh/");
     let server_sock = rt.join("server.sock");
 
-    let cmd = match args.command {
+    let cmd = match cli.command {
         Some(cmd) => cmd,
         None => Command::Start {
-            name: None,
-            program: None,
-            args: vec![],
-            detached: false,
+            name: cli.args.name,
+            program: cli.args.program,
+            args: cli.args.args,
+            detached: cli.args.detached,
         },
     };
     if !server_sock.exists() {
