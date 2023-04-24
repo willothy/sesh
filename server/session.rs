@@ -115,7 +115,7 @@ impl Session {
             let mut pty = pty.try_clone().await?;
             async move {
                 info!(target: "session", "Starting pty write loop");
-                while connected.load(Ordering::Relaxed) == true {
+                while connected.load(Ordering::Relaxed) {
                     let mut i_packet = [0; 4096];
 
                     let i_count = pty.read(&mut i_packet).await?;
@@ -127,7 +127,7 @@ impl Session {
                     }
                     trace!(target: "session", "Read {} bytes from pty", i_count);
                     let read = &i_packet[..i_count];
-                    w_socket.write_all(&read).await?;
+                    w_socket.write_all(read).await?;
                     w_socket.flush().await?;
                     // TODO: Use a less hacky method of reducing CPU usage
                     tokio::time::sleep(Duration::from_millis(1)).await;
@@ -141,7 +141,7 @@ impl Session {
             let mut pty = pty.try_clone().await?;
             async move {
                 info!(target: "session","Starting socket read loop");
-                while connected.load(Ordering::Relaxed) == true {
+                while connected.load(Ordering::Relaxed) {
                     let mut o_packet = [0; 4096];
 
                     let o_count = r_socket.read(&mut o_packet).await?;
@@ -153,7 +153,7 @@ impl Session {
                     }
                     trace!(target: "session", "Read {} bytes from socket", o_count);
                     let read = &o_packet[..o_count];
-                    pty.write_all(&read).await?;
+                    pty.write_all(read).await?;
                     pty.flush().await?;
                     // TODO: Use a less hacky method of reducing CPU usage
                     tokio::time::sleep(Duration::from_millis(1)).await;

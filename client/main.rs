@@ -236,7 +236,7 @@ async fn exec_session(
             .try_clone()
             .context("Could not clone tty_output")?;
         async move {
-            while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+            while !unsafe { EXIT.load(Ordering::Relaxed) } {
                 let mut packet = [0; 4096];
 
                 let nbytes = r_stream.read(&mut packet).await?;
@@ -245,7 +245,7 @@ async fn exec_session(
                 }
                 let read = &packet[..nbytes];
                 tty_output
-                    .write_all(&read)
+                    .write_all(read)
                     .context("Could not write tty_output")?;
                 tty_output.flush().context("Could not flush tty_output")?;
                 // TODO: Use a less hacky method of reducing CPU usage
@@ -258,7 +258,7 @@ async fn exec_session(
         let client = client.clone();
         let name = name.clone();
         async move {
-            while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+            while !unsafe { EXIT.load(Ordering::Relaxed) } {
                 let mut packet = [0; 4096];
 
                 let nbytes = tty_input
@@ -278,7 +278,7 @@ async fn exec_session(
                 }
 
                 w_stream
-                    .write_all(&read)
+                    .write_all(read)
                     .await
                     .context("Failed to write to w_stream")?;
                 w_stream.flush().await.context("Failed to flush w_stream")?;
@@ -295,7 +295,7 @@ async fn exec_session(
             RPCServer::builder()
                 .add_service(SeshCliServer::new(SeshCliService))
                 .serve_with_incoming_shutdown(uds_stream, async move {
-                    while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+                    while !unsafe { EXIT.load(Ordering::Relaxed) } {
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
                     }
                 })
@@ -311,7 +311,7 @@ async fn exec_session(
         async move {
             let mut signal =
                 signal(SignalKind::window_change()).context("Could not read SIGWINCH")?;
-            while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+            while !unsafe { EXIT.load(Ordering::Relaxed) } {
                 signal.recv().await;
                 let size = {
                     let s = termion::terminal_size().unwrap_or((80, 24));
@@ -332,7 +332,7 @@ async fn exec_session(
         }
     });
 
-    while unsafe { EXIT.load(Ordering::Relaxed) } == false {
+    while !unsafe { EXIT.load(Ordering::Relaxed) } {
         unsafe {
             // This doesn't actually kill the process, it just checks if it exists
             if libc::kill(pid, 0) == -1 {
@@ -477,9 +477,9 @@ async fn kill_session(
     });
     let response = client.kill_session(request).await?;
     if response.into_inner().success {
-        return Ok(Some(success!("[killed {}]", session)));
+        Ok(Some(success!("[killed {}]", session)))
     } else {
-        return Err(anyhow::anyhow!("{}", error!("Could not kill process")));
+        Err(anyhow::anyhow!("{}", error!("Could not kill process")))
     }
 }
 
@@ -531,7 +531,7 @@ async fn list_sessions(mut client: SeshdClient<Channel>, table: bool) -> Result<
             icon_title('', "Attached", Fg(color::LightGreen)),
             icon_title('', "Socket", Fg(color::LightCyan)),
         ]);
-        sessions.into_iter().for_each(|s: &SeshInfo| {
+        sessions.iter().for_each(|s: &SeshInfo| {
             // let bullet = if s.connected {
             //     success!("{}{}", Bold, bullets[0])
             // } else {
@@ -685,7 +685,7 @@ async fn main() -> ExitCode {
         } else {
             let size = Size::term_size().unwrap_or(Size { cols: 80, rows: 24 });
             if unsafe { libc::fork() == 0 } {
-                let res = Pty::new(&std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()))
+                let res = Pty::builder(std::env::var("SESHD_PATH").unwrap_or("seshd".to_owned()))
                     .daemonize()
                     .env("RUST_LOG", "INFO")
                     .spawn(&size);

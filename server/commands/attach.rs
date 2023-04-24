@@ -34,14 +34,13 @@ impl Seshd {
                 Size {
                     rows: size.rows as u16,
                     cols: size.cols as u16,
-                    ..Size::term_size()?
                 }
             } else {
                 Size::term_size()?
             };
             session.pty.resize(&Size {
-                cols: (size.cols as u16).checked_sub(2).unwrap_or(2),
-                rows: (size.rows as u16).checked_sub(2).unwrap_or(2),
+                cols: size.cols.checked_sub(2).unwrap_or(2),
+                rows: size.rows.checked_sub(2).unwrap_or(2),
             })?;
             tokio::task::spawn({
                 let sock_path = session.info.sock_path().clone();

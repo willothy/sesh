@@ -24,7 +24,7 @@ impl Seshd {
         let name = PathBuf::from(&name)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or(name.replace("/", "_"));
+            .unwrap_or(name.replace('/', "_"));
 
         let mut session_name = name.clone();
         let mut i = 0;
@@ -35,7 +35,7 @@ impl Seshd {
 
         let socket_path = self.runtime_dir.join(format!("{}.sock", session_name));
 
-        let pty = Pty::new(&program)
+        let pty = Pty::builder(&program)
             .args(args)
             .current_dir(pwd)
             .env("SESH_SESSION", socket_path.clone())

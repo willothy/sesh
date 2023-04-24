@@ -110,7 +110,7 @@ impl PtyBuilder {
                 kill_on_drop: !self.daemonize,
             };
 
-            pty.resize(&size)?;
+            pty.resize(size)?;
 
             Ok(pty)
         })
@@ -118,7 +118,7 @@ impl PtyBuilder {
 }
 
 impl Pty {
-    pub fn new(program: impl AsRef<str>) -> PtyBuilder {
+    pub fn builder(program: impl AsRef<str>) -> PtyBuilder {
         PtyBuilder {
             inner: Command::new(program.as_ref()),
             daemonize: false,
@@ -126,7 +126,7 @@ impl Pty {
     }
 
     pub fn spawn(program: &str, args: Vec<String>, size: &Size) -> Result<Pty> {
-        Pty::new(program).args(args).spawn(size)
+        Pty::builder(program).args(args).spawn(size)
     }
 
     pub fn daemonize(&mut self) {
@@ -166,12 +166,23 @@ impl Pty {
         let mut slave = 0;
 
         unsafe {
+            #[cfg(target_arch = "aarch64")]
             libc::openpty(
                 &mut master,
                 &mut slave,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 &mut size.into(),
+            )
+            .to_result()
+            .context(PTY_ERR)?;
+            #[cfg(not(target_arch = "aarch64"))]
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &size.into(),
             )
             .to_result()
             .context(PTY_ERR)?;
@@ -204,7 +215,7 @@ impl Pty {
             })?;
 
             // Set this process as the controling terminal
-            libc::ioctl(0, libc::TIOCSCTTY as u64, 1)
+            libc::ioctl(0, libc::TIOCSCTTY, 1)
                 .to_result()
                 .map_err(|e| {
                     io::Error::new(
@@ -223,8 +234,8 @@ impl Drop for Pty {
     fn drop(&mut self) {
         unsafe {
             if self.kill_on_drop {
-                let fd = self.fd.clone();
-                let pid = self.pid.clone();
+                let fd = self.fd;
+                let pid = self.pid;
                 // Close file descriptor
                 libc::close(fd);
                 // Kill the owned processed when the Pty is dropped
