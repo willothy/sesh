@@ -5,7 +5,7 @@ use std::{
     os::fd::{FromRawFd, RawFd},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
     },
     time::Duration,
@@ -22,10 +22,35 @@ pub struct Session {
     pub id: usize,
     pub name: String,
     pub program: String,
-    pub sock_path: PathBuf,
     pub pty: Pty,
-    pub connected: Arc<AtomicBool>,
     pub listener: Arc<UnixListener>,
+    pub info: SessionInfo,
+}
+
+pub struct SessionInfo {
+    pub start_time: i64,
+    pub attach_time: Arc<AtomicI64>,
+    connected: Arc<AtomicBool>,
+    sock_path: PathBuf,
+}
+
+impl SessionInfo {
+    pub fn new(sock_path: PathBuf) -> Self {
+        Self {
+            start_time: chrono::Local::now().timestamp_millis(),
+            attach_time: Arc::new(AtomicI64::new(0)),
+            connected: Arc::new(AtomicBool::new(false)),
+            sock_path,
+        }
+    }
+
+    pub fn connected(&self) -> Arc<AtomicBool> {
+        self.connected.clone()
+    }
+
+    pub fn sock_path(&self) -> &PathBuf {
+        &self.sock_path
+    }
 }
 
 impl Session {
@@ -41,9 +66,8 @@ impl Session {
             name,
             program,
             pty,
-            connected: Arc::new(AtomicBool::new(false)),
             listener: Arc::new(UnixListener::bind(&sock_path)?),
-            sock_path,
+            info: SessionInfo::new(sock_path),
         })
     }
 
@@ -61,9 +85,11 @@ impl Session {
         fd: RawFd,
         connected: Arc<AtomicBool>,
         size: Size,
+        attach_time: Arc<AtomicI64>,
     ) -> Result<()> {
         info!(target: "session", "Listening on {:?}", sock_path);
         let (stream, _addr) = socket.accept().await?;
+        attach_time.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
         info!(target: "session", "Accepted connection from {:?}", _addr);
         connected.store(true, Ordering::Release);
 
@@ -142,8 +168,9 @@ impl Session {
     }
 
     pub async fn detach(&self) -> Result<()> {
-        self.connected.store(false, Ordering::Relaxed);
+        self.info.connected.store(false, Ordering::Relaxed);
         let parent = self
+            .info
             .sock_path
             .parent()
             .ok_or(anyhow::anyhow!("No parent"))?;
@@ -165,6 +192,6 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         // get rid of the socket
-        std::fs::remove_file(&self.sock_path).ok();
+        std::fs::remove_file(&self.info.sock_path).ok();
     }
 }

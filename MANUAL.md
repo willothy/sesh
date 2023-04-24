@@ -95,7 +95,11 @@ Kill a session [alias: k]
 
 List sessions [alias: ls]
 
-**Usage:** `sesh list`
+**Usage:** `sesh list [OPTIONS]`
+
+###### **Options:**
+
+* `-i`, `--info` — Print detailed info about sessions
 
 
 

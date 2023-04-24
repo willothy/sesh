@@ -10,6 +10,7 @@ use crate::{Seshd, Session};
 use super::CommandResponse;
 
 impl Seshd {
+    /// RPC handler for attaching to a session
     pub async fn exec_attach(
         &self,
         session: Option<sesh_attach_request::Session>,
@@ -25,7 +26,7 @@ impl Seshd {
                     .map(|(_, s)| s),
             }
             .ok_or_else(|| anyhow::anyhow!("Session {} not found", session))?;
-            if session.connected.load(Ordering::Relaxed) {
+            if session.info.connected().load(Ordering::Relaxed) {
                 return Err(anyhow::anyhow!("Session already connected"));
             }
             info!(target: &session.log_group(), "Attaching");
@@ -43,19 +44,20 @@ impl Seshd {
                 rows: (size.rows as u16).checked_sub(2).unwrap_or(2),
             })?;
             tokio::task::spawn({
-                let sock_path = session.sock_path.clone();
+                let sock_path = session.info.sock_path().clone();
                 let socket = session.listener.clone();
                 let file = session.pty.file().as_raw_fd();
                 let file = unsafe { libc::fcntl(file, libc::F_DUPFD, file) };
-                let connected = session.connected.clone();
+                let connected = session.info.connected();
+                let attach_time = session.info.attach_time.clone();
                 async move {
-                    Session::start(sock_path, socket, file, connected, size).await?;
+                    Session::start(sock_path, socket, file, connected, size, attach_time).await?;
                     Result::<_, anyhow::Error>::Ok(())
                 }
             });
 
             Ok(CommandResponse::AttachSession(SeshAttachResponse {
-                socket: session.sock_path.to_string_lossy().to_string(),
+                socket: session.info.sock_path().to_string_lossy().to_string(),
                 pid: session.pid(),
                 name: session.name.clone(),
             }))

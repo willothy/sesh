@@ -7,6 +7,7 @@
 //! * [`sesh`↴](#sesh)
 //! * [`sesh start`↴](#sesh-start)
 //! * [`sesh attach`↴](#sesh-attach)
+//! * [`sesh select`↴](#sesh-select)
 //! * [`sesh detach`↴](#sesh-detach)
 //! * [`sesh kill`↴](#sesh-kill)
 //! * [`sesh list`↴](#sesh-list)
@@ -20,7 +21,8 @@
 //!
 //! * `start` — Start a new session, optionally specifying a name [alias: s]
 //! * `attach` — Attach to a session [alias: a]
-//! * `detach` — Detach a session remotely [alias: d] Detaches the current session, or the one specified
+//! * `select` — Fuzzy select a session to attach to [alias: f]
+//! * `detach` — Detach the current session or the specified session [alias: d]
 //! * `kill` — Kill a session [alias: k]
 //! * `list` — List sessions [alias: ls]
 //! * `shutdown` — Shutdown the server (kill all sessions)
@@ -57,9 +59,17 @@
 //!
 //!
 //!
+//! ## `sesh select`
+//!
+//! Fuzzy select a session to attach to [alias: f]
+//!
+//! **Usage:** `sesh select`
+//!
+//!
+//!
 //! ## `sesh detach`
 //!
-//! Detach a session remotely [alias: d] Detaches the current session, or the one specified
+//! Detach the current session or the specified session [alias: d]
 //!
 //! **Usage:** `sesh detach [SESSION]`
 //!
@@ -85,7 +95,11 @@
 //!
 //! List sessions [alias: ls]
 //!
-//! **Usage:** `sesh list`
+//! **Usage:** `sesh list [OPTIONS]`
+//!
+//! ###### **Options:**
+//!
+//! * `-i`, `--info` — Print detailed info about sessions
 //!
 //!
 //!
@@ -93,31 +107,28 @@
 //!
 //! Shutdown the server (kill all sessions)
 //!
-//! **Usage:** `sesh shutdown`
-//!
-//!
-//!
 //! <hr/>
-//!
-//! <small><i>
-//!     This document was generated automatically by
-//!     <a href="https://crates.io/crates/clap-markdown"><code>clap-markdown</code></a>.
-//! </i></small>
+
 use std::{
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     path::PathBuf,
     process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::{Context, Result};
+use chrono::{Local, TimeZone};
 use clap::Parser;
 use dialoguer::theme;
 use libc::exit;
+use prettytable::{
+    format::{FormatBuilder, LinePosition, LineSeparator},
+    row, Table,
+};
 use sesh_cli::{Cli, Command, SessionSelector};
 use sesh_shared::{pty::Pty, term::Size};
 use termion::{
-    color::{self, Fg},
+    color::{self, Color, Fg},
     get_tty,
     raw::IntoRawMode,
     screen::IntoAlternateScreen,
@@ -129,6 +140,7 @@ use tokio::{
     signal::unix::{signal, SignalKind},
 };
 use tokio_stream::wrappers::UnixListenerStream;
+use tonic::transport::Server as RPCServer;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
@@ -137,12 +149,14 @@ use sesh_proto::{
     sesh_kill_request::Session,
     sesh_resize_request,
     seshd_client::SeshdClient,
-    SeshResizeRequest, SeshStartRequest, WinSize,
+    SeshInfo, SeshResizeRequest, SeshStartRequest, WinSize,
 };
 
+// TODO: Use message passing instead
 static mut EXIT: AtomicBool = AtomicBool::new(false);
 static mut DETACHED: AtomicBool = AtomicBool::new(false);
 
+/// Formats the given input as green, then resets
 macro_rules! success {
     ($($arg:tt)*) => {
         format!(
@@ -154,6 +168,7 @@ macro_rules! success {
     };
 }
 
+/// Formats the given input as red, then resets
 macro_rules! error {
     ($($arg:expr),*) => {
         format!(
@@ -166,10 +181,12 @@ macro_rules! error {
 }
 
 #[derive(Clone)]
+/// Server -> Client connection service
 struct SeshCliService;
 
 #[tonic::async_trait]
 impl SeshCli for SeshCliService {
+    /// Server -> Client request to detach a session
     async fn detach(
         &self,
         _: tonic::Request<sesh_proto::ClientDetachRequest>,
@@ -182,7 +199,7 @@ impl SeshCli for SeshCliService {
     }
 }
 
-use tonic::transport::Server as RPCServer;
+/// Responsible for executing a session, and managing its IO until it exits.
 async fn exec_session(
     client: SeshdClient<Channel>,
     pid: i32,
@@ -274,7 +291,6 @@ async fn exec_session(
     let w_abort_handle = w_handle.abort_handle();
 
     tokio::task::spawn({
-        // let mut tty_output = tty_output.try_clone()?;
         async move {
             RPCServer::builder()
                 .add_service(SeshCliServer::new(SeshCliService))
@@ -321,6 +337,7 @@ async fn exec_session(
             // This doesn't actually kill the process, it just checks if it exists
             if libc::kill(pid, 0) == -1 {
                 // check errno
+                // TODO: Figure out why this doesn't work on M1/M2 macs
                 #[cfg(target_arch = "aarch64")]
                 let errno = *libc::__error();
                 #[cfg(not(target_arch = "aarch64"))]
@@ -345,6 +362,7 @@ async fn exec_session(
     Ok(())
 }
 
+/// Sends a start session request to the server, and handles the response
 async fn start_session(
     mut client: SeshdClient<Channel>,
     name: Option<String>,
@@ -384,6 +402,7 @@ async fn start_session(
     }
 }
 
+/// Sends an attach session request to the server, and handles the response
 async fn attach_session(
     mut client: SeshdClient<Channel>,
     session: SessionSelector,
@@ -417,6 +436,7 @@ async fn attach_session(
     }
 }
 
+/// Sends a detach session request to the server, and handles the response
 async fn detach_session(
     mut client: SeshdClient<Channel>,
     session: Option<SessionSelector>,
@@ -444,6 +464,7 @@ async fn detach_session(
     Ok(None)
 }
 
+/// Sends a list sessions request to the server, and handles the response
 async fn kill_session(
     mut client: SeshdClient<Channel>,
     session: SessionSelector,
@@ -462,34 +483,118 @@ async fn kill_session(
     }
 }
 
-async fn list_sessions(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
+// TODO: Make these configurable
+/// Active session icon
+static ACTIVE_ICON: char = '⯌';
+/// Bullet icon
+static BULLET_ICON: char = '❒';
+
+/// Formats an icon and title pair, giving the icon its own color
+fn icon_title<T: Color>(icon: char, title: &str, icon_color: Fg<T>) -> String {
+    format!(
+        "{}{}{} {}{}{}",
+        icon_color,
+        icon,
+        Fg(termion::color::Reset),
+        Bold,
+        title,
+        termion::style::Reset
+    )
+}
+
+/// Sends a list sessions request to the server, and handles the response
+async fn list_sessions(mut client: SeshdClient<Channel>, table: bool) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshListRequest {});
     let response = client.list_sessions(request).await?.into_inner();
     let sessions = &response.sessions;
 
-    let mut res = String::new();
-    for (i, session) in sessions.iter().enumerate() {
-        if i > 0 {
-            res += "\n";
-        }
-        let bullets = ["❒", "።", "⯌", "●"];
-        let bullet = if session.connected {
-            success!("{}{}", Bold, bullets[0])
-        } else {
-            format!("{}{}", Bold, bullets[0])
-        };
-        res += &format!(
-            "{} {col}{}{reset} \u{2218} {}",
-            bullet,
-            session.id,
-            session.name,
-            col = Fg(color::LightBlue),
-            reset = Fg(color::Reset)
+    if table {
+        let mut table = Table::new();
+        table.set_format(
+            FormatBuilder::new()
+                .column_separator('│')
+                .borders('│')
+                .separator(LinePosition::Top, LineSeparator::new('─', '┬', '╭', '╮'))
+                // -------
+                .separator(LinePosition::Intern, LineSeparator::new('─', '┼', '├', '┤'))
+                // -------
+                .separator(LinePosition::Bottom, LineSeparator::new('─', '┴', '╰', '╯'))
+                .padding(1, 1)
+                .build(),
         );
+        // const SOCKET_ICON: char = '';
+        //
+        table.set_titles(row![
+            icon_title('', "Id", Fg(color::LightRed)),
+            icon_title('', "Name", Fg(color::LightBlue)),
+            icon_title('', "Started", Fg(color::LightYellow)),
+            icon_title('', "Attached", Fg(color::LightGreen)),
+            icon_title('', "Socket", Fg(color::LightCyan)),
+        ]);
+        sessions.into_iter().for_each(|s: &SeshInfo| {
+            // let bullet = if s.connected {
+            //     success!("{}{}", Bold, bullets[0])
+            // } else {
+            //     format!("{}{}", Bold, bullets[0])
+            // };
+            let connected = if s.connected {
+                success!(" {}{}", Fg(color::LightGreen), ACTIVE_ICON)
+            } else {
+                "".to_owned()
+            };
+            let s_time = Local.timestamp_millis_opt(s.start_time).unwrap();
+            table.add_row(row![
+                format!(
+                    "{col}{}{reset}",
+                    s.id,
+                    col = Fg(color::LightBlue),
+                    reset = Fg(color::Reset)
+                ),
+                format!("{}{}{reset}", s.name, connected, reset = Fg(color::Reset)),
+                s_time.format("%m/%d/%g \u{2218} %I:%M%P"),
+                if let Some(attached) = s.attach_time {
+                    match Local.timestamp_millis_opt(attached) {
+                        chrono::LocalResult::None => "Unknown".to_owned(),
+                        chrono::LocalResult::Single(a_time)
+                        | chrono::LocalResult::Ambiguous(a_time, _) => {
+                            a_time.format("%m/%d/%g \u{2218} %I:%M%P").to_string()
+                        }
+                    }
+                } else {
+                    "Never".to_owned()
+                },
+                s.socket
+            ]);
+        });
+        let mut rendered = Cursor::new(Vec::new());
+        table.print(&mut rendered)?;
+        let s = String::from_utf8(rendered.into_inner())?;
+        Ok(Some(s))
+    } else {
+        let mut res = String::new();
+        for (i, session) in sessions.iter().enumerate() {
+            if i > 0 {
+                res += "\n";
+            }
+            let bullet = if session.connected {
+                success!("{}{}", Bold, BULLET_ICON)
+            } else {
+                format!("{}{}", Bold, BULLET_ICON)
+            };
+            res += &format!(
+                "{} {col}{}{reset} \u{2218} {}",
+                bullet,
+                session.id,
+                session.name,
+                col = Fg(color::LightBlue),
+                reset = Fg(color::Reset)
+            );
+        }
+        Ok(Some(res))
     }
-    Ok(Some(res))
 }
 
+/// Initializes the Tonic client with a UnixStream from the provided socket path
 async fn init_client(sock_path: PathBuf) -> Result<SeshdClient<Channel>> {
     if !sock_path.exists() {
         return Err(anyhow::anyhow!(
@@ -509,6 +614,7 @@ async fn init_client(sock_path: PathBuf) -> Result<SeshdClient<Channel>> {
     Ok(SeshdClient::new(channel))
 }
 
+/// Sends a shutdown request to the server
 async fn shutdown_server(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::ShutdownServerRequest {});
     let response = client.shutdown_server(request).await?;
@@ -519,6 +625,7 @@ async fn shutdown_server(mut client: SeshdClient<Channel>) -> Result<Option<Stri
     }))
 }
 
+/// Wraps the `list_sessions` and `attach_session` requests to allow fuzzy searching over sessions
 async fn select_session(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshListRequest {});
     let response = client.list_sessions(request).await?.into_inner();
@@ -570,11 +677,11 @@ async fn main() -> ExitCode {
     };
     if !server_sock.exists() {
         if matches!(cmd, Command::Shutdown)
-            || matches!(cmd, Command::List)
+            || matches!(cmd, Command::List { .. })
             || matches!(cmd, Command::Kill { .. })
         {
-            println!("{}", error!("[not running]"));
-            return ExitCode::FAILURE;
+            println!("{}", success!("[not running]"));
+            return ExitCode::SUCCESS;
         } else {
             let size = Size::term_size().unwrap_or(Size { cols: 80, rows: 24 });
             if unsafe { libc::fork() == 0 } {
@@ -611,7 +718,7 @@ async fn main() -> ExitCode {
         Command::Kill { session } => kill_session(client, session).await,
         Command::Detach { session } => detach_session(client, session).await,
         Command::Select => select_session(client).await,
-        Command::List => list_sessions(client).await,
+        Command::List { info } => list_sessions(client, info).await,
         Command::Shutdown => shutdown_server(client).await,
     };
 

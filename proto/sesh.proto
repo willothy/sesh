@@ -102,7 +102,10 @@ message SeshInfo {
 	uint64 id = 1;
 	string name = 2;
 	string program = 3;
-	bool connected = 4;
+	string socket = 4;
+	bool connected = 5;
+	int64 start_time = 6;
+	optional int64 attach_time = 7;
 }
 
 message SeshListResponse {

@@ -18,7 +18,17 @@ impl Seshd {
                 id: session.id as u64,
                 name: name.clone(),
                 program: session.program.clone(),
-                connected: session.connected.load(Ordering::Relaxed),
+                connected: session.info.connected().load(Ordering::Relaxed),
+                attach_time: {
+                    let time = session.info.attach_time.load(Ordering::Relaxed);
+                    if time == 0 {
+                        None
+                    } else {
+                        Some(time)
+                    }
+                },
+                start_time: session.info.start_time,
+                socket: session.info.sock_path().to_string_lossy().to_string(),
             })
             .collect::<Vec<_>>();
         if sessions.is_empty() && crate::EXIT_ON_EMPTY {

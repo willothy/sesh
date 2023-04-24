@@ -60,18 +60,19 @@ impl Seshd {
             pty,
             PathBuf::from(&socket_path),
         )?;
-        info!(target: &session.log_group(), "Starting on {}", session.sock_path.display());
+        info!(target: &session.log_group(), "Starting on {}", session.info.sock_path().display());
         tokio::task::spawn({
-            let sock_path = session.sock_path.clone();
+            let sock_path = session.info.sock_path().clone();
             let socket = session.listener.clone();
             // let file = session.pty.file().try_clone().await?;
             let file = session.pty.file().as_raw_fd();
             // Duplicate FD
             // I do not know why this makes the socket connection not die, but it does
             let file = unsafe { libc::fcntl(file, libc::F_DUPFD, file) };
-            let connected = session.connected.clone();
+            let connected = session.info.connected();
+            let attach_time = session.info.attach_time.clone();
             async move {
-                Session::start(sock_path, socket, file, connected, size).await?;
+                Session::start(sock_path, socket, file, connected, size, attach_time).await?;
                 Result::<_, anyhow::Error>::Ok(())
             }
         });

@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use anyhow::Result;
 use log::info;
 use sesh_proto::{sesh_detach_request as req, SeshDetachResponse};
@@ -7,6 +9,7 @@ use crate::Seshd;
 use super::CommandResponse;
 
 impl Seshd {
+    /// RPC handler for detaching a session
     pub async fn exec_detach(&self, session: Option<req::Session>) -> Result<CommandResponse> {
         if let Some(session) = session {
             let sessions = self.sessions.lock().await;
@@ -25,6 +28,10 @@ impl Seshd {
                 if let Some(session) = sessions.get(&name) {
                     info!(target: &session.log_group(), "Detaching");
                     session.detach().await?;
+                    session
+                        .info
+                        .attach_time
+                        .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
                     info!(target: &session.log_group(), "Detached");
                 }
             }

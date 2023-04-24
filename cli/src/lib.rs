@@ -48,7 +48,11 @@ pub enum Command {
     },
     /// List sessions [alias: ls]
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Print detailed info about sessions
+        #[arg(short, long)]
+        info: bool,
+    },
     /// Shutdown the server (kill all sessions)
     Shutdown,
 }
