@@ -42,8 +42,9 @@ See the `help` subcommand or [MANUAL.md](https://github.com/willothy/sesh/blob/m
 
 ## Integration:
 
-<details>
-<summary><a href="https://starship.rs/">Starship</a></summary>
+### Starship
+
+<img src="https://user-images.githubusercontent.com/38540736/234249256-cbb399aa-683b-48af-85a3-70206347a4f7.png" />
 
 ```toml
 [custom.sesh]
@@ -51,5 +52,3 @@ command = "echo $SESH_NAME"
 when = ''' test "$SESH_NAME" != "" '''
 format = '\(sesh [$output]($style)\)'
 ```
-
-</details>
