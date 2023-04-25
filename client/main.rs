@@ -609,7 +609,7 @@ async fn list_sessions(mut ctx: Ctx, table: bool, json: bool) -> Result<Option<S
                     format!("{}{}", Bold, BULLET_ICON)
                 };
                 res += &format!(
-                    "{} {col}{}{reset} \u{2218} {}{}",
+                    "{} {col}{}{reset} \u{2218} {}{}{reset_attr}",
                     bullet,
                     session.id,
                     session.name,
@@ -618,7 +618,8 @@ async fn list_sessions(mut ctx: Ctx, table: bool, json: bool) -> Result<Option<S
                         session.program.split('/').last().unwrap_or("")
                     ),
                     col = Fg(color::LightBlue),
-                    reset = Fg(color::Reset)
+                    reset = Fg(color::Reset),
+                    reset_attr = termion::style::Reset
                 );
             }
             Ok(Some(res))
