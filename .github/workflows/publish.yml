@@ -3,29 +3,11 @@ name: Publish
   push:
     tags:
       - '*'
+  workflow_dispatch:
 jobs:
   publish:
-    name: 'Publish for ${{ matrix.os }}'
-    runs-on: '${{ matrix.os }}'
-    strategy:
-      matrix:
-        name:
-          - linux
-          - windows
-          - macos
-        include:
-          - name: linux
-            os: ubuntu-latest
-            artifact_name: target/release/<name>
-            asset_name: <name>-linux
-          - name: windows
-            os: windows-latest
-            artifact_name: target/release/<name>.exe
-            asset_name: <name>-windows
-          - name: macos
-            os: macos-latest
-            artifact_name: target/release/<name>
-            asset_name: <name>-macos
+    name: Publish for Linux-x86_64
+    runs-on: ubuntu-latest
     steps:
       - name: Apt update
         run: sudo apt update
@@ -41,5 +23,10 @@ jobs:
       - name: Upload binaries to release
         uses: actions/upload-artifact@v2
         with:
-          name: '${{ matrix.asset_name }}'
-          path: '${{ matrix.artifact_name }}'
+          name: seshd
+          path: target/release/seshd
+      - name: Upload binaries to release
+        uses: actions/upload-artifact@v2
+        with:
+          name: sesh
+          path: target/release/sesh
