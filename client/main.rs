@@ -169,7 +169,6 @@ use std::{
     io::{Cursor, Read, Write},
     path::PathBuf,
     process::ExitCode,
-    sync::atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::{Context, Result};
@@ -193,7 +192,9 @@ use termion::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
-    signal::unix::{signal, SignalKind},
+    select,
+    signal::unix::{self, signal, SignalKind},
+    sync::broadcast,
 };
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server as RPCServer;
@@ -208,9 +209,12 @@ use sesh_proto::{
     SeshInfo, SeshResizeRequest, SeshStartRequest, WinSize,
 };
 
-// TODO: Use message passing instead
-static mut EXIT: AtomicBool = AtomicBool::new(false);
-static mut DETACHED: AtomicBool = AtomicBool::new(false);
+#[repr(u8)]
+#[derive(Debug, Clone)]
+enum ExitKind {
+    Quit,
+    Detach,
+}
 
 /// Formats the given input as green, then resets
 macro_rules! success {
@@ -238,7 +242,9 @@ macro_rules! error {
 
 #[derive(Clone)]
 /// Server -> Client connection service
-struct SeshCliService;
+struct SeshCliService {
+    exit_tx: broadcast::Sender<ExitKind>,
+}
 
 #[tonic::async_trait]
 impl SeshCli for SeshCliService {
@@ -247,21 +253,15 @@ impl SeshCli for SeshCliService {
         &self,
         _: tonic::Request<sesh_proto::ClientDetachRequest>,
     ) -> std::result::Result<tonic::Response<sesh_proto::ClientDetachResponse>, tonic::Status> {
-        unsafe {
-            EXIT.store(true, Ordering::Relaxed);
-            DETACHED.store(true, Ordering::Relaxed);
-        }
+        self.exit_tx
+            .send(ExitKind::Detach)
+            .map_err(|_| tonic::Status::internal("Failed to send exit signal to client"))?;
         Ok(tonic::Response::new(sesh_proto::ClientDetachResponse {}))
     }
 }
 
 /// Responsible for executing a session, and managing its IO until it exits.
-async fn exec_session(
-    client: SeshdClient<Channel>,
-    pid: i32,
-    socket: String,
-    name: String,
-) -> Result<()> {
+async fn exec_session(ctx: Ctx, pid: i32, socket: String, name: String) -> Result<ExitKind> {
     std::env::set_var("SESH_NAME", &name);
     let tty_output = get_tty()
         .context("Failed to get tty")?
@@ -297,8 +297,9 @@ async fn exec_session(
         let mut tty_output = tty_output
             .try_clone()
             .context("Could not clone tty_output")?;
+        let exit = ctx.exit.0.subscribe();
         async move {
-            while !unsafe { EXIT.load(Ordering::Relaxed) } {
+            while exit.is_empty() {
                 let mut packet = [0; 4096];
 
                 let nbytes = r_stream.read(&mut packet).await?;
@@ -317,10 +318,10 @@ async fn exec_session(
         }
     });
     let w_handle = tokio::task::spawn({
-        let client = client.clone();
+        let ctx = ctx.copy();
         let name = name.clone();
         async move {
-            while !unsafe { EXIT.load(Ordering::Relaxed) } {
+            while ctx.exit.1.is_empty() {
                 let mut packet = [0; 4096];
 
                 let nbytes = tty_input
@@ -335,7 +336,7 @@ async fn exec_session(
                 // TODO: Make this configurable
 
                 if nbytes >= 2 && read[0] == 27 && read[1] == 92 {
-                    detach_session(client, Some(SessionSelector::Name(name))).await?;
+                    detach_session(ctx, Some(SessionSelector::Name(name))).await?;
                     break;
                 }
 
@@ -353,13 +354,12 @@ async fn exec_session(
     let w_abort_handle = w_handle.abort_handle();
 
     tokio::task::spawn({
+        let (exit_tx, mut exit_rx) = (ctx.exit.0.clone(), ctx.exit.0.subscribe());
         async move {
             RPCServer::builder()
-                .add_service(SeshCliServer::new(SeshCliService))
+                .add_service(SeshCliServer::new(SeshCliService { exit_tx }))
                 .serve_with_incoming_shutdown(uds_stream, async move {
-                    while !unsafe { EXIT.load(Ordering::Relaxed) } {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-                    }
+                    exit_rx.recv().await.ok();
                 })
                 .await?;
             w_abort_handle.abort();
@@ -369,11 +369,11 @@ async fn exec_session(
 
     tokio::task::spawn({
         let name = name.clone();
-        let mut client = client.clone();
+        let mut ctx = ctx.copy();
         async move {
             let mut signal =
                 signal(SignalKind::window_change()).context("Could not read SIGWINCH")?;
-            while !unsafe { EXIT.load(Ordering::Relaxed) } {
+            while ctx.exit.0.is_empty() {
                 signal.recv().await;
                 let size = {
                     let s = termion::terminal_size().unwrap_or((80, 24));
@@ -382,7 +382,7 @@ async fn exec_session(
                         cols: s.0 as u32,
                     }
                 };
-                client
+                ctx.client
                     .resize_session(SeshResizeRequest {
                         size: Some(size),
                         session: Some(sesh_resize_request::Session::Name(name.clone())),
@@ -394,7 +394,9 @@ async fn exec_session(
         }
     });
 
-    while !unsafe { EXIT.load(Ordering::Relaxed) } {
+    let (exit_tx, exit_rx) = ctx.exit;
+    let mut res_rx = exit_tx.subscribe();
+    while exit_rx.is_empty() {
         unsafe {
             // This doesn't actually kill the process, it just checks if it exists
             if libc::kill(pid, 0) == -1 {
@@ -407,7 +409,7 @@ async fn exec_session(
                 if errno == 3 {
                     //libc::ESRCH {
                     // process doesn't exist / has exited
-                    EXIT.store(true, Ordering::Relaxed);
+                    exit_tx.send(ExitKind::Quit)?;
                     break;
                 }
             }
@@ -421,7 +423,7 @@ async fn exec_session(
     w_handle.abort();
     // r_handle.await??;
     r_handle.abort();
-    Ok(())
+    res_rx.recv().await.context("Could not receive exit event")
 }
 
 fn get_program(program: Option<String>) -> String {
@@ -430,7 +432,7 @@ fn get_program(program: Option<String>) -> String {
 
 /// Sends a start session request to the server, and handles the response
 async fn start_session(
-    mut client: SeshdClient<Channel>,
+    mut ctx: Ctx,
     name: Option<String>,
     program: Option<String>,
     args: Vec<String>,
@@ -451,26 +453,26 @@ async fn start_session(
         size: Some(size),
         pwd: std::env::current_dir()?.to_string_lossy().to_string(),
     });
-    let res = client
+
+    let res = ctx
+        .client
         .start_session(req)
         .await
         .map_err(|e| anyhow::anyhow!("Could not start session: {}", e))?
         .into_inner();
     if attach {
-        exec_session(client, res.pid, res.socket, res.name).await?;
-    }
-    if unsafe { DETACHED.load(Ordering::Relaxed) } {
-        Ok(Some(success!("[detached]")))
-    } else if !attach {
-        Ok(Some(success!("[started]")))
+        match exec_session(ctx, res.pid, res.socket, res.name).await? {
+            ExitKind::Quit => Ok(Some(success!("[exited]"))),
+            ExitKind::Detach => Ok(Some(success!("[detached]"))),
+        }
     } else {
-        Ok(Some(success!("[exited]")))
+        Ok(Some(success!("[started]")))
     }
 }
 
 /// Sends an attach session request to the server, and handles the response
 async fn attach_session(
-    mut client: SeshdClient<Channel>,
+    mut ctx: Ctx,
     session: SessionSelector,
     create: bool,
 ) -> Result<Option<String>> {
@@ -490,25 +492,20 @@ async fn attach_session(
         session: Some(session_resolved),
         size: Some(size),
     });
-    let res = match client.attach_session(req).await {
+    let res = match ctx.client.attach_session(req).await {
         Ok(res) => res.into_inner(),
-        Err(_) if create => return start_session(client, session.name(), None, vec![], true).await,
+        Err(_) if create => return start_session(ctx, session.name(), None, vec![], true).await,
         Err(e) => return Err(anyhow::anyhow!("Session not found: {e}")),
     };
 
-    exec_session(client, res.pid, res.socket, res.name).await?;
-    if unsafe { DETACHED.load(Ordering::Relaxed) } {
-        Ok(Some(success!("[detached]")))
-    } else {
-        Ok(Some(success!("[exited]")))
+    match exec_session(ctx, res.pid, res.socket, res.name).await? {
+        ExitKind::Quit => Ok(Some(success!("[exited]"))),
+        ExitKind::Detach => Ok(Some(success!("[detached]"))),
     }
 }
 
 /// Sends a detach session request to the server, and handles the response
-async fn detach_session(
-    mut client: SeshdClient<Channel>,
-    session: Option<SessionSelector>,
-) -> Result<Option<String>> {
+async fn detach_session(mut ctx: Ctx, session: Option<SessionSelector>) -> Result<Option<String>> {
     use sesh_proto::sesh_detach_request::Session::*;
     let session = match session {
         Some(SessionSelector::Id(id)) => Id(id as u64),
@@ -523,27 +520,21 @@ async fn detach_session(
     let request = tonic::Request::new(sesh_proto::SeshDetachRequest {
         session: Some(session),
     });
-    let _response = client.detach_session(request).await?;
-    unsafe {
-        EXIT.store(true, Ordering::Relaxed);
-        DETACHED.store(true, Ordering::Relaxed);
-    }
+    let _response = ctx.client.detach_session(request).await?;
+    ctx.exit.0.send(ExitKind::Detach)?;
 
     Ok(None)
 }
 
 /// Sends a list sessions request to the server, and handles the response
-async fn kill_session(
-    mut client: SeshdClient<Channel>,
-    session: SessionSelector,
-) -> Result<Option<String>> {
+async fn kill_session(mut ctx: Ctx, session: SessionSelector) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshKillRequest {
         session: Some(match &session {
             SessionSelector::Id(id) => Session::Id(*id as u64),
             SessionSelector::Name(name) => Session::Name(name.clone()),
         }),
     });
-    let response = client.kill_session(request).await?;
+    let response = ctx.client.kill_session(request).await?;
     if response.into_inner().success {
         Ok(Some(success!("[killed {}]", session)))
     } else {
@@ -600,13 +591,9 @@ struct SeshInfoSer {
 }
 
 /// Sends a list sessions request to the server, and handles the response
-async fn list_sessions(
-    mut client: SeshdClient<Channel>,
-    table: bool,
-    json: bool,
-) -> Result<Option<String>> {
+async fn list_sessions(mut ctx: Ctx, table: bool, json: bool) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshListRequest {});
-    let response = client.list_sessions(request).await?.into_inner();
+    let response = ctx.client.list_sessions(request).await?.into_inner();
     let sessions = &response.sessions;
 
     match ListMode::new(table, json) {
@@ -715,30 +702,10 @@ async fn list_sessions(
     }
 }
 
-/// Initializes the Tonic client with a UnixStream from the provided socket path
-async fn init_client(sock_path: PathBuf) -> Result<SeshdClient<Channel>> {
-    if !sock_path.exists() {
-        return Err(anyhow::anyhow!(
-            "Server socket not found at {}",
-            sock_path.display()
-        ));
-    }
-
-    // Create a channel to the server socket
-    let channel = Endpoint::try_from("http://[::]:50051")?
-        .connect_with_connector(service_fn(move |_: Uri| {
-            // Connect to a Uds socket
-            UnixStream::connect(sock_path.clone())
-        }))
-        .await?;
-
-    Ok(SeshdClient::new(channel))
-}
-
 /// Sends a shutdown request to the server
-async fn shutdown_server(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
+async fn shutdown_server(mut ctx: Ctx) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::ShutdownServerRequest {});
-    let response = client.shutdown_server(request).await?;
+    let response = ctx.client.shutdown_server(request).await?;
     Ok(Some(if response.into_inner().success {
         success!("[shutdown]")
     } else {
@@ -747,9 +714,9 @@ async fn shutdown_server(mut client: SeshdClient<Channel>) -> Result<Option<Stri
 }
 
 /// Wraps the `list_sessions` and `attach_session` requests to allow fuzzy searching over sessions
-async fn select_session(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
+async fn select_session(mut ctx: Ctx) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshListRequest {});
-    let response = client.list_sessions(request).await?.into_inner();
+    let response = ctx.client.list_sessions(request).await?.into_inner();
     let sessions = response
         .sessions
         .into_iter()
@@ -769,30 +736,89 @@ async fn select_session(mut client: SeshdClient<Channel>) -> Result<Option<Strin
         return Err(anyhow::anyhow!("Invalid selection"));
     };
 
-    attach_session(client, SessionSelector::Name(name.clone()), false).await
+    attach_session(ctx, SessionSelector::Name(name.clone()), false).await
 }
 
-async fn resume_session(mut client: SeshdClient<Channel>, create: bool) -> Result<Option<String>> {
+async fn resume_session(mut ctx: Ctx, create: bool) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshListRequest {});
-    let mut sessions = client.list_sessions(request).await?.into_inner().sessions;
+    let mut sessions = ctx
+        .client
+        .list_sessions(request)
+        .await?
+        .into_inner()
+        .sessions;
     sessions.retain(|s| !s.connected);
     sessions.sort_by(|a, b| a.attach_time.cmp(&b.attach_time));
     let session = sessions.into_iter().last();
     match session {
-        Some(session) => attach_session(client, SessionSelector::Name(session.name), false).await,
-        None if create => start_session(client, None, None, vec![], true).await,
+        Some(session) => attach_session(ctx, SessionSelector::Name(session.name), false).await,
+        None if create => start_session(ctx, None, None, vec![], true).await,
         None => Ok(Some(error!("[no sessions to resume]"))),
+    }
+}
+
+/// Initializes the Tonic client with a UnixStream from the provided socket path
+/// Sets up exit broadcast / mpmc channel
+struct Ctx {
+    client: SeshdClient<Channel>,
+    exit: (broadcast::Sender<ExitKind>, broadcast::Receiver<ExitKind>),
+}
+
+impl Ctx {
+    pub async fn init(socket: PathBuf) -> Result<Self> {
+        if !socket.exists() {
+            return Err(anyhow::anyhow!(
+                "Server socket not found at {}",
+                socket.display()
+            ));
+        }
+
+        // Create a channel to the server socket
+        let channel = Endpoint::try_from("http://[::]:50051")?
+            .connect_with_connector(service_fn(move |_: Uri| {
+                // Connect to a Uds socket
+                UnixStream::connect(socket.clone())
+            }))
+            .await?;
+
+        let client = SeshdClient::new(channel);
+
+        let (tx, rx) = broadcast::channel(1);
+
+        tokio::task::spawn({
+            let tx = tx.clone();
+            async move {
+                let mut quit = unix::signal(SignalKind::quit())?;
+                let mut int = unix::signal(SignalKind::interrupt())?;
+                let mut term = unix::signal(SignalKind::terminate())?;
+                let mut alarm = unix::signal(SignalKind::alarm())?;
+                select! {
+                    _ = quit.recv() => (),
+                    _ = int.recv() => (),
+                    _ = term.recv() => (),
+                    _ = alarm.recv() => ()
+                }
+                tx.send(ExitKind::Quit)?;
+                Result::<(), anyhow::Error>::Ok(())
+            }
+        });
+
+        Ok(Ctx {
+            client,
+            exit: (tx, rx),
+        })
+    }
+
+    fn copy(&self) -> Self {
+        Ctx {
+            client: self.client.clone(),
+            exit: (self.exit.0.clone(), self.exit.0.subscribe()),
+        }
     }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let Ok(_) = ctrlc::set_handler(move || unsafe {
-        EXIT.store(true, Ordering::Relaxed);
-    }) else {
-        eprintln!("{}", error!("[failed to set ctrl-c handler]"));
-        return ExitCode::FAILURE;
-    };
     let cli = Cli::parse();
 
     let rt = dirs::runtime_dir()
@@ -836,7 +862,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    let Ok(client) = init_client(server_sock).await else {
+    let Ok(ctx) = Ctx::init(server_sock).await else {
         eprintln!("{}", error!("[failed to connect to server]"));
         return ExitCode::FAILURE;
     };
@@ -847,14 +873,14 @@ async fn main() -> ExitCode {
             program,
             args,
             detached,
-        } => start_session(client, name, program, args, !detached).await,
-        Command::Resume { create } => resume_session(client, create).await,
-        Command::Attach { session, create } => attach_session(client, session, create).await,
-        Command::Kill { session } => kill_session(client, session).await,
-        Command::Detach { session } => detach_session(client, session).await,
-        Command::Select => select_session(client).await,
-        Command::List { info, json } => list_sessions(client, info, json).await,
-        Command::Shutdown => shutdown_server(client).await,
+        } => start_session(ctx, name, program, args, !detached).await,
+        Command::Resume { create } => resume_session(ctx, create).await,
+        Command::Attach { session, create } => attach_session(ctx, session, create).await,
+        Command::Kill { session } => kill_session(ctx, session).await,
+        Command::Detach { session } => detach_session(ctx, session).await,
+        Command::Select => select_session(ctx).await,
+        Command::List { info, json } => list_sessions(ctx, info, json).await,
+        Command::Shutdown => shutdown_server(ctx).await,
     };
 
     match message {
