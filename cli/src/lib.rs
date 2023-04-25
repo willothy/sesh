@@ -99,10 +99,14 @@ pub enum Command {
     /// Prints a compact list of session names and indexes.
     /// With the --info / -i option, prints a nicely formatted table with info about each session.
     #[command(alias = "ls", verbatim_doc_comment)]
+    #[group(required = false, multiple = true)]
     List {
         /// Print detailed info about sessions
         #[arg(short, long)]
         info: bool,
+        /// Print session info as JSON, to be processed by another tool
+        #[arg(short, long)]
+        json: bool,
     },
     /// Shutdown the server (kill all sessions)
     Shutdown,

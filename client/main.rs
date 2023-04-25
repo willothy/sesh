@@ -496,13 +496,6 @@ async fn attach_session(
         Err(e) => return Err(anyhow::anyhow!("Session not found: {e}")),
     };
 
-    // match session {
-    //     Some(session) => attach_session(client, SessionSelector::Name(session.name)).await,
-    //     None if create => start_session(client, None, None, vec![], true).await,
-    //     None => Ok(Some(error!("[no sessions to resume]"))),
-    // }
-    // .context("Could not attach session")?
-    // .into_inner();
     exec_session(client, res.pid, res.socket, res.name).await?;
     if unsafe { DETACHED.load(Ordering::Relaxed) } {
         Ok(Some(success!("[detached]")))
@@ -577,95 +570,147 @@ fn icon_title<T: Color>(icon: char, title: &str, icon_color: Fg<T>) -> String {
     )
 }
 
+enum ListMode {
+    List,
+    Table,
+    Json,
+}
+
+impl ListMode {
+    pub fn new(table: bool, json: bool) -> Self {
+        if json {
+            Self::Json
+        } else if table {
+            Self::Table
+        } else {
+            Self::List
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SeshInfoSer {
+    index: usize,
+    name: String,
+    program: String,
+    socket: String,
+    connected: bool,
+    start_time: i64,
+    attach_time: i64,
+}
+
 /// Sends a list sessions request to the server, and handles the response
-async fn list_sessions(mut client: SeshdClient<Channel>, table: bool) -> Result<Option<String>> {
+async fn list_sessions(
+    mut client: SeshdClient<Channel>,
+    table: bool,
+    json: bool,
+) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshListRequest {});
     let response = client.list_sessions(request).await?.into_inner();
     let sessions = &response.sessions;
 
-    if table {
-        let mut table = Table::new();
-        table.set_format(
-            FormatBuilder::new()
-                .column_separator('│')
-                .borders('│')
-                .separator(LinePosition::Top, LineSeparator::new('─', '┬', '╭', '╮'))
-                // -------
-                .separator(LinePosition::Intern, LineSeparator::new('─', '┼', '├', '┤'))
-                // -------
-                .separator(LinePosition::Bottom, LineSeparator::new('─', '┴', '╰', '╯'))
-                .padding(1, 1)
-                .build(),
-        );
-        // const SOCKET_ICON: char = '';
-        //
-        table.set_titles(row![
-            icon_title('', "Id", Fg(color::LightRed)),
-            icon_title('', "Name", Fg(color::LightBlue)),
-            icon_title('', "Started", Fg(color::LightYellow)),
-            icon_title('', "Attached", Fg(color::LightGreen)),
-            icon_title('', "Socket", Fg(color::LightCyan)),
-        ]);
-        sessions.iter().for_each(|s: &SeshInfo| {
-            // let bullet = if s.connected {
-            //     success!("{}{}", Bold, bullets[0])
-            // } else {
-            //     format!("{}{}", Bold, bullets[0])
-            // };
-            let connected = if s.connected {
-                success!(" {}{}", Fg(color::LightGreen), ACTIVE_ICON)
-            } else {
-                "".to_owned()
-            };
-            let s_time = Local.timestamp_millis_opt(s.start_time).unwrap();
-            table.add_row(row![
-                format!(
-                    "{col}{}{reset}",
-                    s.id,
+    match ListMode::new(table, json) {
+        ListMode::List => {
+            let mut res = String::new();
+            for (i, session) in sessions.iter().enumerate() {
+                if i > 0 {
+                    res += "\n";
+                }
+                let bullet = if session.connected {
+                    success!("{}{}", Bold, BULLET_ICON)
+                } else {
+                    format!("{}{}", Bold, BULLET_ICON)
+                };
+                res += &format!(
+                    "{} {col}{}{reset} \u{2218} {}",
+                    bullet,
+                    session.id,
+                    session.name,
                     col = Fg(color::LightBlue),
                     reset = Fg(color::Reset)
-                ),
-                format!("{}{}{reset}", s.name, connected, reset = Fg(color::Reset)),
-                s_time.format("%m/%d/%g \u{2218} %I:%M%P"),
-                if s.attach_time > 0 {
-                    match Local.timestamp_millis_opt(s.attach_time) {
-                        chrono::LocalResult::None => "Unknown".to_owned(),
-                        chrono::LocalResult::Single(a_time)
-                        | chrono::LocalResult::Ambiguous(a_time, _) => {
-                            a_time.format("%m/%d/%g \u{2218} %I:%M%P").to_string()
-                        }
-                    }
-                } else {
-                    "Never".to_owned()
-                },
-                s.socket
-            ]);
-        });
-        let mut rendered = Cursor::new(Vec::new());
-        table.print(&mut rendered)?;
-        let s = String::from_utf8(rendered.into_inner())?;
-        Ok(Some(s))
-    } else {
-        let mut res = String::new();
-        for (i, session) in sessions.iter().enumerate() {
-            if i > 0 {
-                res += "\n";
+                );
             }
-            let bullet = if session.connected {
-                success!("{}{}", Bold, BULLET_ICON)
-            } else {
-                format!("{}{}", Bold, BULLET_ICON)
-            };
-            res += &format!(
-                "{} {col}{}{reset} \u{2218} {}",
-                bullet,
-                session.id,
-                session.name,
-                col = Fg(color::LightBlue),
-                reset = Fg(color::Reset)
-            );
+            Ok(Some(res))
         }
-        Ok(Some(res))
+        ListMode::Table => {
+            let mut table = Table::new();
+            table.set_format(
+                FormatBuilder::new()
+                    .column_separator('│')
+                    .borders('│')
+                    .separator(LinePosition::Top, LineSeparator::new('─', '┬', '╭', '╮'))
+                    // -------
+                    .separator(LinePosition::Intern, LineSeparator::new('─', '┼', '├', '┤'))
+                    // -------
+                    .separator(LinePosition::Bottom, LineSeparator::new('─', '┴', '╰', '╯'))
+                    .padding(1, 1)
+                    .build(),
+            );
+            // const SOCKET_ICON: char = '';
+            //
+            table.set_titles(row![
+                icon_title('', "Id", Fg(color::LightRed)),
+                icon_title('', "Name", Fg(color::LightBlue)),
+                icon_title('', "Started", Fg(color::LightYellow)),
+                icon_title('', "Attached", Fg(color::LightGreen)),
+                icon_title('', "Socket", Fg(color::LightCyan)),
+            ]);
+            sessions.iter().for_each(|s: &SeshInfo| {
+                // let bullet = if s.connected {
+                //     success!("{}{}", Bold, bullets[0])
+                // } else {
+                //     format!("{}{}", Bold, bullets[0])
+                // };
+                let connected = if s.connected {
+                    success!(" {}{}", Fg(color::LightGreen), ACTIVE_ICON)
+                } else {
+                    "".to_owned()
+                };
+                let s_time = Local.timestamp_millis_opt(s.start_time).unwrap();
+                table.add_row(row![
+                    format!(
+                        "{col}{}{reset}",
+                        s.id,
+                        col = Fg(color::LightBlue),
+                        reset = Fg(color::Reset)
+                    ),
+                    format!("{}{}{reset}", s.name, connected, reset = Fg(color::Reset)),
+                    s_time.format("%m/%d/%g \u{2218} %I:%M%P"),
+                    if s.attach_time > 0 {
+                        match Local.timestamp_millis_opt(s.attach_time) {
+                            chrono::LocalResult::None => "Unknown".to_owned(),
+                            chrono::LocalResult::Single(a_time)
+                            | chrono::LocalResult::Ambiguous(a_time, _) => {
+                                a_time.format("%m/%d/%g \u{2218} %I:%M%P").to_string()
+                            }
+                        }
+                    } else {
+                        "Never".to_owned()
+                    },
+                    s.socket
+                ]);
+            });
+            let mut rendered = Cursor::new(Vec::new());
+            table.print(&mut rendered)?;
+            let s = String::from_utf8(rendered.into_inner())?;
+            Ok(Some(s))
+        }
+        ListMode::Json => {
+            let sessions = sessions
+                .iter()
+                .map(|s| SeshInfoSer {
+                    index: s.id as usize,
+                    name: s.name.clone(),
+                    program: s.program.clone(),
+                    socket: s.socket.clone(),
+                    connected: s.connected,
+                    start_time: s.start_time,
+                    attach_time: s.attach_time,
+                })
+                .collect::<Vec<_>>();
+            let json = serde_json::to_string_pretty(&sessions)?;
+            Ok(Some(json))
+        }
     }
 }
 
@@ -807,7 +852,7 @@ async fn main() -> ExitCode {
         Command::Kill { session } => kill_session(client, session).await,
         Command::Detach { session } => detach_session(client, session).await,
         Command::Select => select_session(client).await,
-        Command::List { info } => list_sessions(client, info).await,
+        Command::List { info, json } => list_sessions(client, info, json).await,
         Command::Shutdown => shutdown_server(client).await,
     };
 

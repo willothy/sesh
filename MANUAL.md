@@ -156,6 +156,7 @@ With the --info / -i option, prints a nicely formatted table with info about eac
 ###### **Options:**
 
 * `-i`, `--info` — Print detailed info about sessions
+* `-j`, `--json` — Print session info as JSON, to be processed by another tool
 
 
 
