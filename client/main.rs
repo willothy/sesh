@@ -45,7 +45,11 @@
 //!
 //! Resume the last used session [alias: r]
 //!
-//! **Usage:** `sesh resume`
+//! **Usage:** `sesh resume [OPTIONS]`
+//!
+//! ###### **Options:**
+//!
+//! * `-c`, `--create` — Create a new session if one does not exist
 //!
 //!
 //!
@@ -71,11 +75,15 @@
 //!
 //! Attach to a session [alias: a]
 //!
-//! **Usage:** `sesh attach <SESSION>`
+//! **Usage:** `sesh attach [OPTIONS] <SESSION>`
 //!
 //! ###### **Arguments:**
 //!
 //! * `<SESSION>` — Id or name of session
+//!
+//! ###### **Options:**
+//!
+//! * `-c`, `--create` — Create a new session if one does not exist
 //!
 //!
 //!
