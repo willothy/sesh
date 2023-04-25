@@ -30,7 +30,11 @@ pub struct CliArgs {
 pub enum Command {
     #[command(alias = "r")]
     /// Resume the last used session [alias: r]
-    Resume,
+    Resume {
+        /// Create a new session if one does not exist
+        #[arg(short, long)]
+        create: bool,
+    },
     #[command(alias = "s")]
     /// Start a new session, optionally specifying a name [alias: s]
     Start {
@@ -46,6 +50,9 @@ pub enum Command {
     Attach {
         /// Id or name of session
         session: SessionSelector,
+        /// Create a new session if one does not exist
+        #[arg(short, long)]
+        create: bool,
     },
     /// Fuzzy select a session to attach to [alias: f]
     #[command(alias = "f")]
@@ -77,6 +84,15 @@ pub enum Command {
 pub enum SessionSelector {
     Id(usize),
     Name(String),
+}
+
+impl SessionSelector {
+    pub fn name(self) -> Option<String> {
+        match self {
+            SessionSelector::Id(_) => None,
+            SessionSelector::Name(name) => Some(name),
+        }
+    }
 }
 
 impl Display for SessionSelector {

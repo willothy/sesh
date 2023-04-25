@@ -24,9 +24,6 @@ impl Seshd {
                 socket: session.info.sock_path().to_string_lossy().to_string(),
             })
             .collect::<Vec<_>>();
-        if sessions.is_empty() && crate::EXIT_ON_EMPTY {
-            self.exit_signal.clone().send(())?;
-        }
         Ok(CommandResponse::ListSessions(SeshListResponse { sessions }))
     }
 }

@@ -244,6 +244,12 @@ async fn exec_session(
         .parent()
         .ok_or(anyhow::anyhow!("Could not get runtime dir"))?;
     let client_server_sock = sock_dir.join(format!("client-{}.sock", pid));
+    if client_server_sock.exists() {
+        std::fs::remove_file(&client_server_sock).context(format!(
+            "Failed to remove existing (server -> client) socket {}",
+            &client_server_sock.display()
+        ))?;
+    }
     let uds = tokio::net::UnixListener::bind(&client_server_sock).context(format!(
         "Failed to bind listener to {}",
         &client_server_sock.display()
@@ -378,12 +384,16 @@ async fn exec_session(
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
-    tokio::fs::remove_file(&client_server_sock).await?;
+    // tokio::fs::remove_file(&client_server_sock).await?;
     // the write handle will block if it's not aborted
     w_handle.abort();
     // r_handle.await??;
     r_handle.abort();
     Ok(())
+}
+
+fn get_program(program: Option<String>) -> String {
+    program.unwrap_or_else(|| std::env::var("SHELL").unwrap_or("bash".to_owned()))
 }
 
 /// Sends a start session request to the server, and handles the response
@@ -394,7 +404,7 @@ async fn start_session(
     args: Vec<String>,
     attach: bool,
 ) -> anyhow::Result<Option<String>> {
-    let program = program.unwrap_or_else(|| std::env::var("SHELL").unwrap_or("bash".to_owned()));
+    let program = get_program(program);
     let size = {
         let s = termion::terminal_size().unwrap_or((80, 24));
         WinSize {
@@ -412,7 +422,7 @@ async fn start_session(
     let res = client
         .start_session(req)
         .await
-        .context("Could not start session")?
+        .map_err(|e| anyhow::anyhow!("Could not start session: {}", e))?
         .into_inner();
     if attach {
         exec_session(client, res.pid, res.socket, res.name).await?;
@@ -430,11 +440,12 @@ async fn start_session(
 async fn attach_session(
     mut client: SeshdClient<Channel>,
     session: SessionSelector,
+    create: bool,
 ) -> Result<Option<String>> {
     use sesh_proto::sesh_attach_request::Session::*;
-    let session = match session {
-        SessionSelector::Id(id) => Id(id as u64),
-        SessionSelector::Name(name) => Name(name),
+    let session_resolved = match &session {
+        SessionSelector::Id(id) => Id(*id as u64),
+        SessionSelector::Name(name) => Name(name.clone()),
     };
     let size = {
         let s = termion::terminal_size().unwrap_or((80, 24));
@@ -444,14 +455,22 @@ async fn attach_session(
         }
     };
     let req = tonic::Request::new(sesh_proto::SeshAttachRequest {
-        session: Some(session),
+        session: Some(session_resolved),
         size: Some(size),
     });
-    let res = client
-        .attach_session(req)
-        .await
-        .context("Could not attach session")?
-        .into_inner();
+    let res = match client.attach_session(req).await {
+        Ok(res) => res.into_inner(),
+        Err(_) if create => return start_session(client, session.name(), None, vec![], true).await,
+        Err(e) => return Err(anyhow::anyhow!("Session not found: {e}")),
+    };
+
+    // match session {
+    //     Some(session) => attach_session(client, SessionSelector::Name(session.name)).await,
+    //     None if create => start_session(client, None, None, vec![], true).await,
+    //     None => Ok(Some(error!("[no sessions to resume]"))),
+    // }
+    // .context("Could not attach session")?
+    // .into_inner();
     exec_session(client, res.pid, res.socket, res.name).await?;
     if unsafe { DETACHED.load(Ordering::Relaxed) } {
         Ok(Some(success!("[detached]")))
@@ -672,19 +691,20 @@ async fn select_session(mut client: SeshdClient<Channel>) -> Result<Option<Strin
         return Err(anyhow::anyhow!("Invalid selection"));
     };
 
-    attach_session(client, SessionSelector::Name(name.clone())).await
+    attach_session(client, SessionSelector::Name(name.clone()), false).await
 }
 
-async fn resume_session(mut client: SeshdClient<Channel>) -> Result<Option<String>> {
+async fn resume_session(mut client: SeshdClient<Channel>, create: bool) -> Result<Option<String>> {
     let request = tonic::Request::new(sesh_proto::SeshListRequest {});
     let mut sessions = client.list_sessions(request).await?.into_inner().sessions;
+    sessions.retain(|s| !s.connected);
     sessions.sort_by(|a, b| a.attach_time.cmp(&b.attach_time));
-    let session = sessions
-        .into_iter()
-        // .filter(|s| s.attach_time.is_some())
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("No sessions to resume"))?;
-    attach_session(client, SessionSelector::Name(session.name)).await
+    let session = sessions.into_iter().last();
+    match session {
+        Some(session) => attach_session(client, SessionSelector::Name(session.name), false).await,
+        None if create => start_session(client, None, None, vec![], true).await,
+        None => Ok(Some(error!("[no sessions to resume]"))),
+    }
 }
 
 #[tokio::main]
@@ -750,8 +770,8 @@ async fn main() -> ExitCode {
             args,
             detached,
         } => start_session(client, name, program, args, !detached).await,
-        Command::Resume => resume_session(client).await,
-        Command::Attach { session } => attach_session(client, session).await,
+        Command::Resume { create } => resume_session(client, create).await,
+        Command::Attach { session, create } => attach_session(client, session, create).await,
         Command::Kill { session } => kill_session(client, session).await,
         Command::Detach { session } => detach_session(client, session).await,
         Command::Select => select_session(client).await,

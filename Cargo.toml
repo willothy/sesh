@@ -50,6 +50,6 @@ anyhow = "1.0.70"
 members = [
 	"proto",
 	"shared",
-	"cli"
+	"cli",
 ]
 
