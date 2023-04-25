@@ -622,10 +622,14 @@ async fn list_sessions(
                     format!("{}{}", Bold, BULLET_ICON)
                 };
                 res += &format!(
-                    "{} {col}{}{reset} \u{2218} {}",
+                    "{} {col}{}{reset} \u{2218} {}{}",
                     bullet,
                     session.id,
                     session.name,
+                    format!(
+                        " \u{2218} {}",
+                        session.program.split('/').last().unwrap_or("")
+                    ),
                     col = Fg(color::LightBlue),
                     reset = Fg(color::Reset)
                 );
@@ -653,14 +657,10 @@ async fn list_sessions(
                 icon_title('', "Name", Fg(color::LightBlue)),
                 icon_title('', "Started", Fg(color::LightYellow)),
                 icon_title('', "Attached", Fg(color::LightGreen)),
-                icon_title('', "Socket", Fg(color::LightCyan)),
+                // icon_title('', "Socket", Fg(color::LightCyan)),
+                icon_title('', "Program", Fg(color::LightCyan))
             ]);
             sessions.iter().for_each(|s: &SeshInfo| {
-                // let bullet = if s.connected {
-                //     success!("{}{}", Bold, bullets[0])
-                // } else {
-                //     format!("{}{}", Bold, bullets[0])
-                // };
                 let connected = if s.connected {
                     success!(" {}{}", Fg(color::LightGreen), ACTIVE_ICON)
                 } else {
@@ -687,7 +687,8 @@ async fn list_sessions(
                     } else {
                         "Never".to_owned()
                     },
-                    s.socket
+                    // s.socket
+                    s.program
                 ]);
             });
             let mut rendered = Cursor::new(Vec::new());
