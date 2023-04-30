@@ -56,7 +56,7 @@ impl Seshd {
         let session = Session::new(
             session_id,
             session_name.clone(),
-            program,
+            program.clone(),
             pty,
             PathBuf::from(&socket_path),
         )?;
@@ -79,9 +79,10 @@ impl Seshd {
 
         sessions.insert(session.name.clone(), session);
         Ok(CommandResponse::StartSession(SeshStartResponse {
-            socket: socket_path.to_string_lossy().to_string(),
-            name: session_name,
             pid,
+            program,
+            name: session_name,
+            socket: socket_path.to_string_lossy().to_string(),
         }))
     }
 }

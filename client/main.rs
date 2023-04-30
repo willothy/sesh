@@ -261,14 +261,25 @@ impl SeshCli for SeshCliService {
 }
 
 /// Responsible for executing a session, and managing its IO until it exits.
-async fn exec_session(ctx: Ctx, pid: i32, socket: String, name: String) -> Result<ExitKind> {
+async fn exec_session(
+    ctx: Ctx,
+    pid: i32,
+    socket: String,
+    name: String,
+    program: String,
+) -> Result<ExitKind> {
     std::env::set_var("SESH_NAME", &name);
-    let tty_output = get_tty()
+    std::io::stdout().write(format!("\x1B]0;{}\x07", "test").as_bytes())?;
+    let mut tty_output = get_tty()
         .context("Failed to get tty")?
         .into_raw_mode()
         .context("Failed to set raw mode")?
         .into_alternate_screen()
         .context("Failed to enter alternate screen")?;
+
+    // Set terminal title
+    tty_output.write(format!("\x1B]0;{}\x07", program).as_bytes())?;
+
     let mut tty_input = tty_output.try_clone()?;
 
     let sock = PathBuf::from(&socket);
@@ -461,7 +472,7 @@ async fn start_session(
         .map_err(|e| anyhow::anyhow!("Could not start session: {}", e))?
         .into_inner();
     if attach {
-        match exec_session(ctx, res.pid, res.socket, res.name).await? {
+        match exec_session(ctx, res.pid, res.socket, res.name, res.program).await? {
             ExitKind::Quit => Ok(Some(success!("[exited]"))),
             ExitKind::Detach => Ok(Some(success!("[detached]"))),
         }
@@ -498,7 +509,7 @@ async fn attach_session(
         Err(e) => return Err(anyhow::anyhow!("Session not found: {e}")),
     };
 
-    match exec_session(ctx, res.pid, res.socket, res.name).await? {
+    match exec_session(ctx, res.pid, res.socket, res.name, res.program).await? {
         ExitKind::Quit => Ok(Some(success!("[exited]"))),
         ExitKind::Detach => Ok(Some(success!("[detached]"))),
     }

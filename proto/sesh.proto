@@ -63,6 +63,7 @@ message SeshAttachResponse {
 	string socket = 1;
 	int32 pid = 2;
 	string name = 3;
+	string program = 4;
 }
 
 message ShutdownServerRequest {}
@@ -83,6 +84,7 @@ message SeshStartResponse {
 	string socket = 1;
 	int32 pid = 2;
 	string name = 3;
+	string program = 4;
 }
 
 message SeshKillRequest {

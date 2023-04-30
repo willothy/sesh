@@ -59,6 +59,7 @@ impl Seshd {
                 socket: session.info.sock_path().to_string_lossy().to_string(),
                 pid: session.pid(),
                 name: session.name.clone(),
+                program: session.program.clone(),
             }))
         } else {
             anyhow::bail!("No session specified");
