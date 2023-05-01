@@ -17,6 +17,7 @@ impl Seshd {
         args: Vec<String>,
         size: Option<WinSize>,
         pwd: String,
+        env: Vec<(String, String)>,
     ) -> Result<CommandResponse> {
         let mut sessions = self.sessions.lock().await;
         let session_id = sessions.len();
@@ -38,6 +39,7 @@ impl Seshd {
         let pty = Pty::builder(&program)
             .args(args)
             .current_dir(pwd)
+            .envs(env)
             .env("SESH_SESSION", socket_path.clone())
             .env("SESH_NAME", session_name.clone())
             .spawn(&Size::term_size()?)?;

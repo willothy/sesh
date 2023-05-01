@@ -72,12 +72,18 @@ message ShutdownServerResponse {
 	bool success = 1;
 }
 
+message Var {
+	string key = 1;
+	string value = 2;
+}
+
 message SeshStartRequest {
 	string name = 1;
 	string program = 2;
 	repeated string args = 3;
 	WinSize size = 4;
 	string pwd = 5;
+	repeated Var env = 6;
 }
 
 message SeshStartResponse {

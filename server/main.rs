@@ -91,7 +91,18 @@ impl Seshd {
                 args,
                 size,
                 pwd,
-            }) => self.exec_start(name, program, args, size, pwd).await,
+                env,
+            }) => {
+                self.exec_start(
+                    name,
+                    program,
+                    args,
+                    size,
+                    pwd,
+                    env.into_iter().map(|v| (v.key, v.value)).collect(),
+                )
+                .await
+            }
             Command::AttachSession(SeshAttachRequest { session, size }) => {
                 self.exec_attach(session, size).await
             }

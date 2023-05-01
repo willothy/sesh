@@ -269,7 +269,7 @@ async fn exec_session(
     program: String,
 ) -> Result<ExitKind> {
     std::env::set_var("SESH_NAME", &name);
-    std::io::stdout().write(format!("\x1B]0;{}\x07", "test").as_bytes())?;
+    std::io::stdout().write_all(format!("\x1B]0;{}\x07", "test").as_bytes())?;
     let mut tty_output = get_tty()
         .context("Failed to get tty")?
         .into_raw_mode()
@@ -278,7 +278,7 @@ async fn exec_session(
         .context("Failed to enter alternate screen")?;
 
     // Set terminal title
-    tty_output.write(format!("\x1B]0;{}\x07", program).as_bytes())?;
+    tty_output.write_all(format!("\x1B]0;{}\x07", program).as_bytes())?;
 
     let mut tty_input = tty_output.try_clone()?;
 
@@ -463,6 +463,12 @@ async fn start_session(
         args,
         size: Some(size),
         pwd: std::env::current_dir()?.to_string_lossy().to_string(),
+        env: std::env::vars()
+            .map(|v| sesh_proto::Var {
+                key: v.0,
+                value: v.1,
+            })
+            .collect(),
     });
 
     let res = ctx
@@ -620,14 +626,10 @@ async fn list_sessions(mut ctx: Ctx, table: bool, json: bool) -> Result<Option<S
                     format!("{}{}", Bold, BULLET_ICON)
                 };
                 res += &format!(
-                    "{} {col}{}{reset} \u{2218} {}{}{reset_attr}",
-                    bullet,
-                    session.id,
-                    session.name,
-                    format!(
-                        " \u{2218} {}",
-                        session.program.split('/').last().unwrap_or("")
-                    ),
+                    "{bullet} {col}{id}{reset} \u{2218} {name} \u{2218} {program}{reset_attr}",
+                    id = session.id,
+                    name = session.name,
+                    program = session.program.split('/').last().unwrap_or(""),
                     col = Fg(color::LightBlue),
                     reset = Fg(color::Reset),
                     reset_attr = termion::style::Reset
@@ -868,8 +870,13 @@ async fn main() -> ExitCode {
                     }
                 }
             }
+            let now = std::time::Instant::now();
             while !server_sock.exists() {
                 std::thread::sleep(std::time::Duration::from_millis(100));
+                if now.elapsed().as_secs() > 5 {
+                    eprintln!("{}", error!("[failed to connect to server]"));
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
