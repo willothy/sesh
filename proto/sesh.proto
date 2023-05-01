@@ -114,6 +114,7 @@ message SeshInfo {
 	bool connected = 5;
 	int64 start_time = 6;
 	int64 attach_time = 7;
+	int32 pid = 8;
 }
 
 message SeshListResponse {

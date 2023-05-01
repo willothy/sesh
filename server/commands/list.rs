@@ -22,6 +22,7 @@ impl Seshd {
                 attach_time: session.info.attach_time.load(Ordering::Relaxed),
                 start_time: session.info.start_time,
                 socket: session.info.sock_path().to_string_lossy().to_string(),
+                pid: session.pid(),
             })
             .collect::<Vec<_>>();
         Ok(CommandResponse::ListSessions(SeshListResponse { sessions }))

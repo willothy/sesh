@@ -658,8 +658,8 @@ async fn list_sessions(mut ctx: Ctx, table: bool, json: bool) -> Result<Option<S
                 icon_title('', "Name", Fg(color::LightBlue)),
                 icon_title('', "Started", Fg(color::LightYellow)),
                 icon_title('', "Attached", Fg(color::LightGreen)),
-                // icon_title('', "Socket", Fg(color::LightCyan)),
-                icon_title('', "Program", Fg(color::LightCyan))
+                icon_title('', "Program", Fg(color::LightCyan)),
+                icon_title('', "PID", Fg(color::LightMagenta))
             ]);
             sessions.iter().for_each(|s: &SeshInfo| {
                 let connected = if s.connected {
@@ -689,7 +689,8 @@ async fn list_sessions(mut ctx: Ctx, table: bool, json: bool) -> Result<Option<S
                         "Never".to_owned()
                     },
                     // s.socket
-                    s.program
+                    s.program,
+                    s.pid
                 ]);
             });
             let mut rendered = Cursor::new(Vec::new());
