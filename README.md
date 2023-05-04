@@ -4,8 +4,8 @@ Terminal sessions, written in Rust.
 
 Built on gRPC and unix sockets.
 
-> **Warning**       
-> This is a work in progress, and may contain some bugs.        
+> **Warning**  
+> This is a work in progress, and may contain some bugs.
 
 ## Demo
 
@@ -39,16 +39,8 @@ Git:
 
 See the `help` subcommand or [MANUAL.md](https://github.com/willothy/sesh/blob/main/MANUAL.md) for more info.
 
+### [Integrations](https://github.com/willothy/sesh/blob/main/integrations/):
 
-## Integration:
-
-### Starship
-
-<img src="https://user-images.githubusercontent.com/38540736/234249256-cbb399aa-683b-48af-85a3-70206347a4f7.png" />
-
-```toml
-[custom.sesh]
-command = "echo $SESH_NAME"
-when = ''' test "$SESH_NAME" != "" '''
-format = '\(sesh [$output]($style)\)'
-```
+- Wezterm
+- Shells
+- Starship

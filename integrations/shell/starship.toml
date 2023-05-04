@@ -1,0 +1,6 @@
+[custom.sesh]
+style = '#5de4c7'
+command = "echo $SESH_NAME"
+when = ''' test "$SESH_NAME" != "" '''
+format = '\(sesh [$output]($style)\)'
+
