@@ -43,10 +43,15 @@ sesh.attach = {
 				})
 			end
 		end
+		local tab = window.active_tab
 		window:perform_action(
 			wezterm.action.InputSelector({
 				title = "Select session",
-				action = wezterm.action_callback(function(w, p, name)
+				action = wezterm.action_callback(function(w, p, name, label)
+					if not name and not label then
+						-- cancelled
+						tab:activate()
+					end
 					w:perform_action(
 						wezterm.action.SpawnCommandInNewTab({
 							args = { "sesh", "attach", name },
