@@ -269,7 +269,6 @@ async fn exec_session(
     program: String,
 ) -> Result<ExitKind> {
     std::env::set_var("SESH_NAME", &name);
-    std::io::stdout().write_all(format!("\x1B]0;{}\x07", "test").as_bytes())?;
     let mut tty_output = get_tty()
         .context("Failed to get tty")?
         .into_raw_mode()
@@ -743,9 +742,10 @@ async fn select_session(mut ctx: Ctx) -> Result<Option<String>> {
         .default(0)
         .report(true)
         .with_prompt("Session")
-        .interact_opt() else {
-            return Ok(Some(success!("[cancelled]")));
-        };
+        .interact_opt()
+    else {
+        return Ok(Some(success!("[cancelled]")));
+    };
 
     let Some(name) = sessions.get(select) else {
         return Err(anyhow::anyhow!("Invalid selection"));
