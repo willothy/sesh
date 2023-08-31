@@ -1,6 +1,6 @@
 [package]
 name = "sesh-cli"
-version = "0.1.5"
+version = "0.1.10"
 edition = "2021"
 authors = ["Will Hopkins <willothyh@gmail.com>"]
 license = "MIT"
@@ -12,5 +12,5 @@ documentation = "https://docs.rs/term-sesh"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.70"
-clap = { version = "4.2.4", features = ["derive"] }
+anyhow = "1.0.75"
+clap = { version = "4.4.1", features = ["derive"] }
