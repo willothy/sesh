@@ -166,7 +166,7 @@
 //! **Usage:** `sesh shutdown`
 
 use std::{
-    io::{Cursor, Read, Write},
+    io::{stdin, stdout, Cursor, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -184,7 +184,6 @@ use sesh_cli::{Cli, Command, SessionSelector};
 use sesh_shared::{pty::Pty, term::Size};
 use termion::{
     color::{self, Color, Fg},
-    get_tty,
     raw::IntoRawMode,
     screen::IntoAlternateScreen,
     style::Bold,
@@ -269,8 +268,7 @@ async fn exec_session(
     program: String,
 ) -> Result<ExitKind> {
     std::env::set_var("SESH_NAME", &name);
-    let mut tty_output = get_tty()
-        .context("Failed to get tty")?
+    let mut tty_output = stdout()
         .into_raw_mode()
         .context("Failed to set raw mode")?
         .into_alternate_screen()
@@ -279,7 +277,7 @@ async fn exec_session(
     // Set terminal title
     tty_output.write_all(format!("\x1B]0;{}\x07", program).as_bytes())?;
 
-    let mut tty_input = tty_output.try_clone()?;
+    let mut tty_input = stdin();
 
     let sock = PathBuf::from(&socket);
     let sock_dir = sock
@@ -304,9 +302,6 @@ async fn exec_session(
         .into_split();
 
     let r_handle = tokio::task::spawn({
-        let mut tty_output = tty_output
-            .try_clone()
-            .context("Could not clone tty_output")?;
         let exit = ctx.exit.0.subscribe();
         async move {
             while exit.is_empty() {

@@ -151,7 +151,12 @@ impl Pty {
             libc::ioctl(
                 self.fd,
                 libc::TIOCSWINSZ,
-                &Into::<libc::winsize>::into(size),
+                &libc::winsize {
+                    ws_row: size.rows,
+                    ws_col: size.cols,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                },
             )
             .to_result()
             .map(|_| ())
