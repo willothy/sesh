@@ -20,7 +20,6 @@ impl Seshd {
         env: Vec<(String, String)>,
     ) -> Result<CommandResponse> {
         let mut sessions = self.sessions.lock().await;
-        let session_id = sessions.len();
 
         let name = PathBuf::from(&name)
             .file_name()
@@ -56,30 +55,34 @@ impl Seshd {
         pty.resize(&size)?;
 
         let session = Session::new(
-            session_id,
+            sessions.len(),
             session_name.clone(),
             program.clone(),
             pty,
             PathBuf::from(&socket_path),
         )?;
-        info!(target: &session.log_group(), "Starting on {}", session.info.sock_path().display());
+        sessions.insert(session.name.clone(), session);
+
         tokio::task::spawn({
+            let session = sessions
+                .get(&session_name)
+                .expect("session should exist in sessions");
             let sock_path = session.info.sock_path().clone();
             let socket = session.listener.clone();
-            // let file = session.pty.file().try_clone().await?;
             let file = session.pty.file().as_raw_fd();
             // Duplicate FD
             // I do not know why this makes the socket connection not die, but it does
             let file = unsafe { libc::fcntl(file, libc::F_DUPFD, file) };
             let connected = session.info.connected();
             let attach_time = session.info.attach_time.clone();
+
+            info!(target: &session.log_group(), "Starting on {}", session.info.sock_path().display());
             async move {
                 Session::start(sock_path, socket, file, connected, size, attach_time).await?;
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
 
-        sessions.insert(session.name.clone(), session);
         Ok(CommandResponse::StartSession(SeshStartResponse {
             pid,
             program,
