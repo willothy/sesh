@@ -19,8 +19,6 @@ impl Seshd {
         pwd: String,
         env: Vec<(String, String)>,
     ) -> Result<CommandResponse> {
-        let mut sessions = self.sessions.lock().await;
-
         let name = PathBuf::from(&name)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -28,7 +26,7 @@ impl Seshd {
 
         let mut session_name = name.clone();
         let mut i = 0;
-        while sessions.contains_key(&session_name) {
+        while self.sessions.contains_key(&session_name) {
             session_name = format!("{}-{}", name, i);
             i += 1;
         }
@@ -55,16 +53,17 @@ impl Seshd {
         pty.resize(&size)?;
 
         let session = Session::new(
-            sessions.len(),
+            self.sessions.len(),
             session_name.clone(),
             program.clone(),
             pty,
             PathBuf::from(&socket_path),
         )?;
-        sessions.insert(session.name.clone(), session);
+        self.sessions.insert(session.name.clone(), session);
 
         tokio::task::spawn({
-            let session = sessions
+            let session = self
+                .sessions
                 .get(&session_name)
                 .expect("session should exist in sessions");
             let sock_path = session.info.sock_path().clone();

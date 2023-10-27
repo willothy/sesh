@@ -17,23 +17,24 @@ impl Seshd {
         let Some(size) = size else {
             return Err(anyhow::anyhow!("Invalid size"));
         };
-        let sessions = self.sessions.lock().await;
         let Some(session) = session else {
             return Err(anyhow::anyhow!("Session not found"));
         };
         let Some(name) = (match session {
             req::Session::Name(name) => Some(name),
-            req::Session::Id(id) => {
-                let name = sessions
-                    .iter()
-                    .find(|(_, s)| s.id == id as usize)
-                    .map(|(_, s)| s.name.clone());
-                name
-            }
+            req::Session::Id(id) => self.sessions.iter().find_map(|e| {
+                let session = e.value();
+                if session.id == id as usize {
+                    Some(session.name.clone())
+                } else {
+                    None
+                }
+            }),
         }) else {
             return Err(anyhow::anyhow!("Session not found"));
         };
-        let session = sessions
+        let session = self
+            .sessions
             .get(&name)
             .ok_or_else(|| anyhow::anyhow!("Session not found: {}", name))?;
         info!(target: &session.log_group(), "Resizing");

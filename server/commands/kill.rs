@@ -9,20 +9,20 @@ use super::CommandResponse;
 impl Seshd {
     pub async fn exec_kill(&self, session: Option<req::Session>) -> Result<CommandResponse> {
         if let Some(session) = session {
-            let mut sessions = self.sessions.lock().await;
             let name = match session {
                 req::Session::Name(name) => Some(name),
-                req::Session::Id(id) => {
-                    let name = sessions
-                        .iter()
-                        .find(|(_, s)| s.id == id as usize)
-                        .map(|(_, s)| s.name.clone());
-                    name
-                }
+                req::Session::Id(id) => self.sessions.iter().find_map(|e| {
+                    let session = e.value();
+                    if session.id == id as usize {
+                        Some(session.name.clone())
+                    } else {
+                        None
+                    }
+                }),
             };
 
             let success = if let Some(name) = name {
-                if let Some(session) = sessions.remove(&name) {
+                if let Some((_, session)) = self.sessions.remove(&name) {
                     info!(target: &session.log_group(), "Killing subprocess");
                     true
                 } else {
@@ -31,7 +31,7 @@ impl Seshd {
             } else {
                 false
             };
-            if sessions.is_empty() && crate::EXIT_ON_EMPTY {
+            if self.sessions.is_empty() && crate::EXIT_ON_EMPTY {
                 self.exit_signal.send(())?;
             }
             Ok(CommandResponse::KillSession(SeshKillResponse { success }))

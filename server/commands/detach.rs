@@ -12,20 +12,22 @@ impl Seshd {
     /// RPC handler for detaching a session
     pub async fn exec_detach(&self, session: Option<req::Session>) -> Result<CommandResponse> {
         if let Some(session) = session {
-            let sessions = self.sessions.lock().await;
             let name = match session {
                 sesh_proto::sesh_detach_request::Session::Name(name) => Some(name),
                 sesh_proto::sesh_detach_request::Session::Id(id) => {
-                    let name = sessions
-                        .iter()
-                        .find(|(_, s)| s.id == id as usize)
-                        .map(|(_, s)| s.name.clone());
-                    name
+                    self.sessions.iter().find_map(|e| {
+                        let session = e.value();
+                        if session.id == id as usize {
+                            Some(session.name.clone())
+                        } else {
+                            None
+                        }
+                    })
                 }
             };
 
             if let Some(name) = name {
-                if let Some(session) = sessions.get(&name) {
+                if let Some(session) = self.sessions.get(&name) {
                     info!(target: &session.log_group(), "Detaching");
                     session.detach().await?;
                     session

@@ -17,13 +17,17 @@ impl Seshd {
         size: Option<WinSize>,
     ) -> Result<CommandResponse> {
         if let Some(session) = session {
-            let sessions = self.sessions.lock().await;
             let session = match &session {
-                sesh_proto::sesh_attach_request::Session::Name(name) => sessions.get(name),
-                sesh_proto::sesh_attach_request::Session::Id(id) => sessions
-                    .iter()
-                    .find(|(_, s)| s.id == *id as usize)
-                    .map(|(_, s)| s),
+                sesh_proto::sesh_attach_request::Session::Name(name) => self.sessions.get(name),
+                sesh_proto::sesh_attach_request::Session::Id(id) => {
+                    self.sessions.iter().find_map(|entry| {
+                        if entry.value().id == *id as usize {
+                            Some(self.sessions.get(entry.key())).flatten()
+                        } else {
+                            None
+                        }
+                    })
+                }
             }
             .ok_or_else(|| anyhow::anyhow!("Session {} not found", session))?;
             if session.info.connected().load(Ordering::Relaxed) {

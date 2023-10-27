@@ -1,13 +1,13 @@
 use anyhow::Result;
+use dashmap::DashMap;
 use log::info;
 
 use session::Session;
-use std::collections::HashMap;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc};
 use tokio::{
     net::UnixListener,
     signal::unix::{signal, SignalKind},
-    sync::{mpsc::UnboundedSender, Mutex},
+    sync::mpsc::UnboundedSender,
 };
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server as RPCServer;
@@ -24,29 +24,26 @@ use commands::{Command, CommandResponse};
 
 pub const EXIT_ON_EMPTY: bool = true;
 
-#[derive(Clone)]
 struct Seshd {
-    // TODO: Do I need to queue events?
-    sessions: Arc<Mutex<HashMap<String, Session>>>,
+    sessions: Arc<DashMap<String, Session>>,
     exit_signal: UnboundedSender<()>,
     runtime_dir: PathBuf,
 }
 
 impl Seshd {
     fn new(exit_signal: UnboundedSender<()>, runtime_dir: PathBuf) -> Result<Self> {
-        let sessions = Arc::new(Mutex::new(HashMap::<String, Session>::new()));
+        let sessions = Arc::new(DashMap::<String, Session>::new());
         // Handle process exits
-        // TODO: Send exit signal to connected clients
         tokio::task::spawn({
-            let sessions = sessions.clone();
+            let sessions = Arc::clone(&sessions);
             let exit = exit_signal.clone();
             async move {
                 let mut signal = signal(SignalKind::child())?;
                 loop {
                     signal.recv().await;
-                    let mut sessions = sessions.lock().await;
                     let mut to_remove = Vec::new();
-                    for (name, session) in sessions.iter() {
+                    for entry in sessions.iter() {
+                        let (name, session) = entry.pair();
                         let pid = session.pid();
                         let res = unsafe { libc::waitpid(pid, &mut 0, libc::WNOHANG) };
                         if res > 0 {
@@ -63,11 +60,9 @@ impl Seshd {
                     }
                     if sessions.is_empty() && EXIT_ON_EMPTY {
                         exit.send(())?;
+                        break;
                     }
-                    // TODO: Use a less hacky method of reducing CPU usage
-                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                #[allow(unreachable_code)]
                 Result::<_, anyhow::Error>::Ok(())
             }
         });
