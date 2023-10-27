@@ -166,7 +166,7 @@
 //! **Usage:** `sesh shutdown`
 
 use std::{
-    io::{stdin, stdout, Cursor, Read, Write},
+    io::{stdout, Cursor},
     path::PathBuf,
     process::ExitCode,
 };
@@ -268,16 +268,22 @@ async fn exec_session(
     program: String,
 ) -> Result<ExitKind> {
     std::env::set_var("SESH_NAME", &name);
-    let mut tty_output = stdout()
+    // NOTE: This is used to set raw mode and alternate screen while
+    // still using tokio's async stdout.
+    let _raw = stdout()
         .into_raw_mode()
         .context("Failed to set raw mode")?
         .into_alternate_screen()
         .context("Failed to enter alternate screen")?;
 
-    // Set terminal title
-    tty_output.write_all(format!("\x1B]0;{}\x07", program).as_bytes())?;
+    let mut output = tokio::io::stdout();
 
-    let mut tty_input = stdin();
+    // Set terminal title
+    output
+        .write_all(format!("\x1B]0;{}\x07", program).as_bytes())
+        .await?;
+
+    let mut input = tokio::io::stdin();
 
     let sock = PathBuf::from(&socket);
     let sock_dir = sock
@@ -285,10 +291,12 @@ async fn exec_session(
         .ok_or(anyhow::anyhow!("Could not get runtime dir"))?;
     let client_server_sock = sock_dir.join(format!("client-{}.sock", pid));
     if client_server_sock.exists() {
-        std::fs::remove_file(&client_server_sock).context(format!(
-            "Failed to remove existing (server -> client) socket {}",
-            &client_server_sock.display()
-        ))?;
+        tokio::fs::remove_file(&client_server_sock)
+            .await
+            .context(format!(
+                "Failed to remove existing (server -> client) socket {}",
+                &client_server_sock.display()
+            ))?;
     }
     let uds = tokio::net::UnixListener::bind(&client_server_sock).context(format!(
         "Failed to bind listener to {}",
@@ -301,27 +309,27 @@ async fn exec_session(
         .context("Could not connect to socket stream")?
         .into_split();
 
+    // Reads process output from the server and writes it to the terminal
     let r_handle = tokio::task::spawn({
         let exit = ctx.exit.0.subscribe();
         async move {
+            let mut packet = [0; 4096];
             while exit.is_empty() {
-                let mut packet = [0; 4096];
-
-                let nbytes = r_stream.read(&mut packet).await?;
-                if nbytes == 0 {
-                    break;
+                let bytes = r_stream.read(&mut packet).await?;
+                if bytes == 0 {
+                    continue;
                 }
-                let read = &packet[..nbytes];
-                tty_output
-                    .write_all(read)
+                output
+                    .write_all(&packet[..bytes])
+                    .await
                     .context("Could not write tty_output")?;
-                tty_output.flush().context("Could not flush tty_output")?;
-                // TODO: Use a less hacky method of reducing CPU usage
-                tokio::time::sleep(tokio::time::Duration::from_nanos(200)).await;
+                output.flush().await.context("Could not flush tty_output")?;
             }
             Result::<_, anyhow::Error>::Ok(())
         }
     });
+
+    // Reads terminal input and sends it to the server to be handled by the process.
     let w_handle = tokio::task::spawn({
         let ctx = ctx.copy();
         let name = name.clone();
@@ -329,8 +337,9 @@ async fn exec_session(
             while ctx.exit.1.is_empty() {
                 let mut packet = [0; 4096];
 
-                let nbytes = tty_input
+                let nbytes = input
                     .read(&mut packet)
+                    .await
                     .context("Failed to read tty_input")?;
                 if nbytes == 0 {
                     break;
@@ -339,7 +348,6 @@ async fn exec_session(
 
                 // Alt-\
                 // TODO: Make this configurable
-
                 if nbytes >= 2 && read[0] == 27 && read[1] == 92 {
                     detach_session(ctx, Some(SessionSelector::Name(name))).await?;
                     break;
@@ -350,8 +358,6 @@ async fn exec_session(
                     .await
                     .context("Failed to write to w_stream")?;
                 w_stream.flush().await.context("Failed to flush w_stream")?;
-                // TODO: Use a less hacky method of reducing CPU usage
-                // tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
             }
             Result::<_, anyhow::Error>::Ok(())
         }
