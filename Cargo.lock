@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "term-sesh"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "chrono",
