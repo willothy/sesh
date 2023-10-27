@@ -16,10 +16,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Build
+    - name: Setup protobuf
+      run: |
+        sudo apt install protobuf-compiler
+    - name: Generate
       run: cargo build --verbose
-    - name: Generate manual
-      run: cargo build
     - uses: stefanzweifel/git-auto-commit-action@v4
       with:
         commit_message: "chore(docs): autogenerate manual"
