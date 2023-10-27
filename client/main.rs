@@ -166,9 +166,12 @@
 //! **Usage:** `sesh shutdown`
 
 use std::{
+    future::Future,
     io::{stdin, stdout, Cursor, Read, Write},
     path::PathBuf,
     process::ExitCode,
+    task::{self, Poll},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -188,6 +191,7 @@ use termion::{
     screen::IntoAlternateScreen,
     style::Bold,
 };
+use termwiz::input::{InputEvent, InputParser, KeyCode, KeyCodeEncodeModes, KeyEvent, Modifiers};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -207,6 +211,48 @@ use sesh_proto::{
     seshd_client::SeshdClient,
     SeshInfo, SeshResizeRequest, SeshStartRequest, WinSize,
 };
+
+mod encoding;
+
+struct PollInput<'a, T>(&'a mut T)
+where
+    T: termwiz::terminal::Terminal + Send;
+
+impl<'a, T> Future for PollInput<'a, T>
+where
+    T: termwiz::terminal::Terminal + Send,
+{
+    type Output = Result<InputEvent>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        match self.0.poll_input(Some(Duration::ZERO)) {
+            Ok(Some(v)) => Poll::Ready(Ok(v)),
+            Ok(None) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e.into())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+pub trait PollInputAsync<T>
+where
+    T: termwiz::terminal::Terminal + Send,
+{
+    async fn poll_input_async(&mut self) -> Result<InputEvent>;
+}
+
+#[async_trait::async_trait]
+impl<T> PollInputAsync<T> for T
+where
+    T: termwiz::terminal::Terminal + Send,
+{
+    async fn poll_input_async(&mut self) -> Result<InputEvent> {
+        PollInput(self).await
+    }
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone)]
@@ -277,7 +323,8 @@ async fn exec_session(
     // Set terminal title
     tty_output.write_all(format!("\x1B]0;{}\x07", program).as_bytes())?;
 
-    let mut tty_input = stdin();
+    // let mut tty_input = stdin();
+    let mut tty_input = tokio::io::stdin();
 
     let sock = PathBuf::from(&socket);
     let sock_dir = sock
@@ -322,8 +369,10 @@ async fn exec_session(
             Result::<_, anyhow::Error>::Ok(())
         }
     });
+
     let w_handle = tokio::task::spawn({
-        let ctx = ctx.copy();
+        let mut parser = InputParser::new();
+        let ctx = ctx.clone();
         let name = name.clone();
         async move {
             while ctx.exit.1.is_empty() {
@@ -331,27 +380,47 @@ async fn exec_session(
 
                 let nbytes = tty_input
                     .read(&mut packet)
+                    .await
                     .context("Failed to read tty_input")?;
                 if nbytes == 0 {
                     break;
                 }
                 let read = &packet[..nbytes];
 
-                // Alt-\
-                // TODO: Make this configurable
-
-                if nbytes >= 2 && read[0] == 27 && read[1] == 92 {
-                    detach_session(ctx, Some(SessionSelector::Name(name))).await?;
-                    break;
+                for (event, encoded) in parser.parse_as_vec(read, false).into_iter().map(|ev| {
+                    let encoded = match ev {
+                        termwiz::input::InputEvent::Key(KeyEvent { key, modifiers }) => key
+                            .encode(
+                                modifiers,
+                                KeyCodeEncodeModes {
+                                    encoding: termwiz::input::KeyboardEncoding::CsiU,
+                                    application_cursor_keys: true,
+                                    newline_mode: false,
+                                    modify_other_keys: None,
+                                },
+                                true,
+                            )
+                            .ok(),
+                        _ => None,
+                        // termwiz::input::InputEvent::Mouse(_) => todo!(),
+                        // termwiz::input::InputEvent::PixelMouse(_) => todo!(),
+                        // termwiz::input::InputEvent::Resized { cols, rows } => todo!(),
+                        // termwiz::input::InputEvent::Paste(_) => todo!(),
+                        // termwiz::input::InputEvent::Wake => todo!(),
+                    };
+                    (ev, encoded)
+                }) {
+                    if handle_input(&event, &name, &ctx).await? {
+                        if let Some(encoded) = encoded {
+                            w_stream
+                                .write_all(encoded.as_bytes())
+                                .await
+                                .context("Failed to write to w_stream")?;
+                        }
+                    }
                 }
 
-                w_stream
-                    .write_all(read)
-                    .await
-                    .context("Failed to write to w_stream")?;
                 w_stream.flush().await.context("Failed to flush w_stream")?;
-                // TODO: Use a less hacky method of reducing CPU usage
-                // tokio::time::sleep(tokio::time::Duration::from_nanos(20)).await;
             }
             Result::<_, anyhow::Error>::Ok(())
         }
@@ -374,7 +443,7 @@ async fn exec_session(
 
     tokio::task::spawn({
         let name = name.clone();
-        let mut ctx = ctx.copy();
+        let mut ctx = ctx.clone();
         async move {
             let mut signal =
                 signal(SignalKind::window_change()).context("Could not read SIGWINCH")?;
@@ -429,6 +498,21 @@ async fn exec_session(
     // r_handle.await??;
     r_handle.abort();
     res_rx.recv().await.context("Could not receive exit event")
+}
+
+/// Handles input events from the user, returning true if the event should be forwarded to the server
+/// and handled by the running program.
+async fn handle_input(event: &termwiz::input::InputEvent, name: &str, ctx: &Ctx) -> Result<bool> {
+    Ok(match event {
+        InputEvent::Key(KeyEvent { key, modifiers }) => match key {
+            KeyCode::Char('\\') if *modifiers == Modifiers::ALT => {
+                detach_session(ctx.clone(), Some(SessionSelector::Name(name.to_owned()))).await?;
+                false
+            }
+            _ => true,
+        },
+        _ => true,
+    })
 }
 
 fn get_program(program: Option<String>) -> String {
@@ -818,8 +902,10 @@ impl Ctx {
             exit: (tx, rx),
         })
     }
+}
 
-    fn copy(&self) -> Self {
+impl Clone for Ctx {
+    fn clone(&self) -> Self {
         Ctx {
             client: self.client.clone(),
             exit: (self.exit.0.clone(), self.exit.0.subscribe()),

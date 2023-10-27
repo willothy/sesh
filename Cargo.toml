@@ -53,6 +53,8 @@ serde_json = "1.0.105"
 sesh-shared = { path = "./shared", version = "0.1.11" }
 sesh-proto = { path = "./proto", version = "0.1.10" }
 sesh-cli = { path = "./cli", version = "0.1.10" }
+termwiz = { version = "0.20.0", features = ["serde", "use_serde", "image", "widgets", "cassowary"] }
+async-trait = "0.1.74"
 
 [build-dependencies]
 sesh-cli = { path = "./cli", version = "0.1.10" }
