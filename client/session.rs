@@ -13,6 +13,7 @@ use sesh_proto::{
     sesh_cli_server::SeshCliServer, sesh_kill_request::Session, sesh_resize_request,
     SeshResizeRequest, SeshStartRequest, WinSize,
 };
+use sesh_shared::term::process_exit;
 use termion::color::{self, Fg};
 use termion::{raw::IntoRawMode, screen::IntoAlternateScreen};
 use tokio::signal::unix;
@@ -240,36 +241,17 @@ async fn exec_session(
         }
     });
 
-    let (exit_tx, exit_rx) = ctx.exit;
-    let mut res_rx = exit_tx.subscribe();
-    while exit_rx.is_empty() {
-        unsafe {
-            // This doesn't actually kill the process, it just checks if it exists
-            if libc::kill(pid, 0) == -1 {
-                // check errno
-                // TODO: Figure out why this doesn't work on M1/M2 macs
-                #[cfg(target_arch = "aarch64")]
-                let errno = *libc::__error();
-                #[cfg(not(target_arch = "aarch64"))]
-                let errno = *libc::__errno_location();
-                if errno == 3 {
-                    //libc::ESRCH {
-                    // process doesn't exist / has exited
-                    exit_tx.send(ExitKind::Quit)?;
-                    break;
-                }
-            }
-        }
-        // TODO: Use a less hacky method of reducing CPU usage
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    }
+    let mut exit_rx = ctx.exit.1;
+    let exit = tokio::select! {
+        kind = exit_rx.recv() => kind.unwrap_or(ExitKind::Quit),
+        _ = process_exit(pid) => ExitKind::Quit,
+    };
 
-    // tokio::fs::remove_file(&client_server_sock).await?;
+    tokio::fs::remove_file(&client_server_sock).await.ok();
     // the write handle will block if it's not aborted
     w_handle.abort();
-    // r_handle.await??;
     r_handle.abort();
-    res_rx.recv().await.context("Could not receive exit event")
+    Ok(exit)
 }
 
 /// Sends an attach session request to the server, and handles the response

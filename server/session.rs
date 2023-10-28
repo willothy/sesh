@@ -8,7 +8,6 @@ use std::{
         atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
     },
-    time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -129,8 +128,6 @@ impl Session {
                     let read = &i_packet[..i_count];
                     w_socket.write_all(read).await?;
                     w_socket.flush().await?;
-                    // TODO: Use a less hacky method of reducing CPU usage
-                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 info!(target: "session","Exiting pty read loop");
                 Result::<_, anyhow::Error>::Ok(())
@@ -148,15 +145,12 @@ impl Session {
                     if o_count == 0 {
                         connected.store(false, Ordering::Relaxed);
                         w_handle.abort();
-                        // pty.flush().await?;
                         break;
                     }
                     trace!(target: "session", "Read {} bytes from socket", o_count);
                     let read = &o_packet[..o_count];
                     pty.write_all(read).await?;
                     pty.flush().await?;
-                    // TODO: Use a less hacky method of reducing CPU usage
-                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 info!(target: "session","Exiting socket and pty read loops");
 

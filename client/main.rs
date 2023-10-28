@@ -311,7 +311,7 @@ async fn main() -> ExitCode {
             }
             let now = std::time::Instant::now();
             while !server_sock.exists() {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if now.elapsed().as_secs() > 5 {
                     eprintln!("{}", error!("[failed to connect to server]"));
                     return ExitCode::FAILURE;
