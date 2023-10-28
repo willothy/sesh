@@ -6,7 +6,7 @@ use super::CommandResponse;
 
 impl Seshd {
     pub async fn exec_shutdown(&self) -> Result<CommandResponse> {
-        self.exit_signal.send(())?;
+        self.exit_signal.send(()).await?;
         Ok(CommandResponse::ShutdownServer(ShutdownServerResponse {
             success: true,
         }))

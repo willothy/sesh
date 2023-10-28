@@ -7,7 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::{
     net::UnixListener,
     signal::unix::{signal, SignalKind},
-    sync::mpsc::UnboundedSender,
+    sync::mpsc::Sender,
 };
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server as RPCServer;
@@ -104,12 +104,12 @@ impl SessionList {
 
 struct Seshd {
     sessions: Arc<SessionList>,
-    exit_signal: UnboundedSender<()>,
+    exit_signal: Sender<()>,
     runtime_dir: PathBuf,
 }
 
 impl Seshd {
-    fn new(exit_signal: UnboundedSender<()>, runtime_dir: PathBuf) -> Result<Self> {
+    fn new(exit_signal: Sender<()>, runtime_dir: PathBuf) -> Result<Self> {
         let sessions = Arc::new(SessionList::new());
         // Handle process exits
         tokio::task::spawn({
@@ -120,7 +120,7 @@ impl Seshd {
                 loop {
                     signal.recv().await;
                     if sessions.clean() && EXIT_ON_EMPTY {
-                        exit.send(())?;
+                        exit.send(()).await?;
                         break;
                     }
                 }
@@ -191,7 +191,7 @@ async fn main() -> Result<()> {
     let uds = UnixListener::bind(&socket_path)?;
     let uds_stream = UnixListenerStream::new(uds);
 
-    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let sigint_tx = exit_tx.clone();
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -201,11 +201,11 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = sigint.recv() => {
                 info!(target: "exit", "Received SIGINT");
-                sigint_tx.send(()).ok();
+                sigint_tx.send(()).await.ok();
             },
             _ = sigquit.recv() => {
                 info!(target: "exit", "Received SIGQUIT");
-                sigquit_tx.send(()).ok();
+                sigquit_tx.send(()).await.ok();
             }
         }
     });
