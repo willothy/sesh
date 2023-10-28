@@ -20,13 +20,7 @@ impl Seshd {
             let session = match &session {
                 sesh_proto::sesh_attach_request::Session::Name(name) => self.sessions.get(name),
                 sesh_proto::sesh_attach_request::Session::Id(id) => {
-                    self.sessions.iter().find_map(|entry| {
-                        if entry.value().id == *id as usize {
-                            Some(self.sessions.get(entry.key())).flatten()
-                        } else {
-                            None
-                        }
-                    })
+                    self.sessions.get_by_id(*id as usize)
                 }
             }
             .ok_or_else(|| anyhow::anyhow!("Session {} not found", session))?;

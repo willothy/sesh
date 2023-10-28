@@ -24,15 +24,93 @@ use commands::{Command, CommandResponse};
 
 pub const EXIT_ON_EMPTY: bool = true;
 
+struct SessionList {
+    sessions: DashMap<String, Session>,
+    lookup: DashMap<usize, String>,
+}
+
+impl SessionList {
+    pub fn new() -> Self {
+        Self {
+            sessions: DashMap::new(),
+            lookup: DashMap::new(),
+        }
+    }
+
+    /// Returns the number of sessions
+    pub fn count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Checks if a session exists by name
+    pub fn contains(&self, name: impl AsRef<str>) -> bool {
+        self.sessions.contains_key(name.as_ref())
+    }
+
+    /// Gets a session by name
+    pub fn get(&self, name: impl AsRef<str>) -> Option<dashmap::mapref::one::Ref<String, Session>> {
+        self.sessions.get(name.as_ref())
+    }
+
+    /// Gets a session by id
+    pub fn get_by_id(&self, id: usize) -> Option<dashmap::mapref::one::Ref<String, Session>> {
+        self.lookup
+            .get(&id)
+            .and_then(|name| self.sessions.get(name.as_str()))
+    }
+
+    /// Inserts a session into the list
+    pub fn insert(&self, name: String, session: Session) {
+        self.lookup.insert(session.id, name.clone());
+        self.sessions.insert(name, session);
+    }
+
+    /// Removes a session by name
+    pub fn remove(&self, name: impl AsRef<str>) -> Option<Session> {
+        self.sessions.remove(name.as_ref()).map(|(_, session)| {
+            self.lookup.remove(&session.id);
+            session
+        })
+    }
+
+    /// Removes sessions with exited processes
+    pub fn clean(&self) -> bool {
+        self.sessions.retain(|name, session| {
+            let pid = session.pid();
+            let res = unsafe { libc::waitpid(pid, &mut 0, libc::WNOHANG) };
+            if res > 0 {
+                info!(
+                    target: &format!("{}: {}", session.id, name),
+                    "Subprocess {} exited", session.program
+                );
+            }
+            return res <= 0;
+        });
+        self.lookup
+            .retain(|_, name| self.sessions.contains_key(name));
+        return self.sessions.is_empty();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = dashmap::mapref::multiple::RefMulti<String, Session>> {
+        self.sessions.iter()
+    }
+}
+
 struct Seshd {
-    sessions: Arc<DashMap<String, Session>>,
+    sessions: Arc<SessionList>,
     exit_signal: UnboundedSender<()>,
     runtime_dir: PathBuf,
 }
 
 impl Seshd {
     fn new(exit_signal: UnboundedSender<()>, runtime_dir: PathBuf) -> Result<Self> {
-        let sessions = Arc::new(DashMap::<String, Session>::new());
+        let sessions = Arc::new(SessionList::new());
         // Handle process exits
         tokio::task::spawn({
             let sessions = Arc::clone(&sessions);
@@ -41,24 +119,7 @@ impl Seshd {
                 let mut signal = signal(SignalKind::child())?;
                 loop {
                     signal.recv().await;
-                    let mut to_remove = Vec::new();
-                    for entry in sessions.iter() {
-                        let (name, session) = entry.pair();
-                        let pid = session.pid();
-                        let res = unsafe { libc::waitpid(pid, &mut 0, libc::WNOHANG) };
-                        if res > 0 {
-                            info!(
-                                target: &format!("{}: {}", session.id, name),
-                                "Subprocess {} exited", session.program
-                            );
-                            to_remove.push(name.clone());
-                        }
-                    }
-                    // Remove sessions with exited processes
-                    for name in to_remove {
-                        sessions.remove(&name);
-                    }
-                    if sessions.is_empty() && EXIT_ON_EMPTY {
+                    if sessions.clean() && EXIT_ON_EMPTY {
                         exit.send(())?;
                         break;
                     }
@@ -153,7 +214,6 @@ async fn main() -> Result<()> {
     info!(target: "init", "Setting up RPC server");
     RPCServer::builder()
         .add_service(SeshdServer::new(Seshd::new(exit_tx, runtime_dir)?))
-        // .serve_with_incoming(uds_stream)
         .serve_with_incoming_shutdown(uds_stream, async move {
             exit_rx.recv().await;
         })

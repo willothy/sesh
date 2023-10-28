@@ -15,14 +15,7 @@ impl Seshd {
             let name = match session {
                 sesh_proto::sesh_detach_request::Session::Name(name) => Some(name),
                 sesh_proto::sesh_detach_request::Session::Id(id) => {
-                    self.sessions.iter().find_map(|e| {
-                        let session = e.value();
-                        if session.id == id as usize {
-                            Some(session.name.clone())
-                        } else {
-                            None
-                        }
-                    })
+                    self.sessions.get_by_id(id as usize).map(|s| s.name.clone())
                 }
             };
 

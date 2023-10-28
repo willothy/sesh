@@ -11,18 +11,13 @@ impl Seshd {
         if let Some(session) = session {
             let name = match session {
                 req::Session::Name(name) => Some(name),
-                req::Session::Id(id) => self.sessions.iter().find_map(|e| {
-                    let session = e.value();
-                    if session.id == id as usize {
-                        Some(session.name.clone())
-                    } else {
-                        None
-                    }
-                }),
+                req::Session::Id(id) => {
+                    self.sessions.get_by_id(id as usize).map(|s| s.name.clone())
+                }
             };
 
             let success = if let Some(name) = name {
-                if let Some((_, session)) = self.sessions.remove(&name) {
+                if let Some(session) = self.sessions.remove(&name) {
                     info!(target: &session.log_group(), "Killing subprocess");
                     true
                 } else {

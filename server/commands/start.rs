@@ -26,7 +26,7 @@ impl Seshd {
 
         let mut session_name = name.clone();
         let mut i = 0;
-        while self.sessions.contains_key(&session_name) {
+        while self.sessions.contains(&session_name) {
             session_name = format!("{}-{}", name, i);
             i += 1;
         }
@@ -53,7 +53,7 @@ impl Seshd {
         pty.resize(&size)?;
 
         let session = Session::new(
-            self.sessions.len(),
+            self.sessions.count(),
             session_name.clone(),
             program.clone(),
             pty,
