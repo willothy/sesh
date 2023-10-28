@@ -16,7 +16,6 @@ use sesh_proto::{
 use sesh_shared::term::process_exit;
 use termion::color::{self, Fg};
 use termion::{raw::IntoRawMode, screen::IntoAlternateScreen};
-use tokio::signal::unix;
 use tokio::sync::broadcast;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -62,24 +61,6 @@ impl Ctx {
         let client = SeshdClient::new(channel);
 
         let (tx, rx) = broadcast::channel(1);
-
-        tokio::task::spawn({
-            let tx = tx.clone();
-            async move {
-                let mut quit = unix::signal(SignalKind::quit())?;
-                let mut int = unix::signal(SignalKind::interrupt())?;
-                let mut term = unix::signal(SignalKind::terminate())?;
-                let mut alarm = unix::signal(SignalKind::alarm())?;
-                tokio::select! {
-                    _ = quit.recv() => (),
-                    _ = int.recv() => (),
-                    _ = term.recv() => (),
-                    _ = alarm.recv() => ()
-                }
-                tx.send(ExitKind::Quit)?;
-                Result::<(), anyhow::Error>::Ok(())
-            }
-        });
 
         Ok(Ctx {
             client,
@@ -218,33 +199,41 @@ async fn exec_session(
         let name = name.clone();
         let mut ctx = ctx.copy();
         async move {
-            let mut signal =
-                signal(SignalKind::window_change()).context("Could not read SIGWINCH")?;
-            while ctx.exit.0.is_empty() {
-                signal.recv().await;
-                let size = {
-                    let s = termion::terminal_size().unwrap_or((80, 24));
-                    WinSize {
-                        rows: s.1 as u32,
-                        cols: s.0 as u32,
+            let mut signal = signal(SignalKind::window_change())?;
+            loop {
+                tokio::select! {
+                    _ = ctx.exit.1.recv() => break,
+                    _ = signal.recv() => {
+                        let size = {
+                            let s = termion::terminal_size().unwrap_or((80, 24));
+                            WinSize {
+                                rows: s.1 as u32,
+                                cols: s.0 as u32,
+                            }
+                        };
+                        ctx.client.resize_session(SeshResizeRequest {
+                            size: Some(size),
+                            session: Some(sesh_resize_request::Session::Name(name.clone())),
+                        }).await.context("Failed to resize")?;
                     }
-                };
-                ctx.client
-                    .resize_session(SeshResizeRequest {
-                        size: Some(size),
-                        session: Some(sesh_resize_request::Session::Name(name.clone())),
-                    })
-                    .await
-                    .context("Failed to resize")?;
+                }
             }
             Result::<_, anyhow::Error>::Ok(())
         }
     });
 
     let mut exit_rx = ctx.exit.1;
+    let mut quit = signal(SignalKind::quit())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut alarm = signal(SignalKind::alarm())?;
     let exit = tokio::select! {
         kind = exit_rx.recv() => kind.unwrap_or(ExitKind::Quit),
         _ = process_exit(pid) => ExitKind::Quit,
+        _ = quit.recv() => ExitKind::Quit,
+        _ = interrupt.recv() => ExitKind::Quit,
+        _ = terminate.recv() => ExitKind::Quit,
+        _ = alarm.recv() => ExitKind::Quit,
     };
 
     tokio::fs::remove_file(&client_server_sock).await.ok();
@@ -505,7 +494,6 @@ pub async fn list(mut ctx: Ctx, table: bool, json: bool) -> Result<Option<String
                     } else {
                         "Never".to_owned()
                     },
-                    // s.socket
                     s.program,
                     s.pid
                 ]);
