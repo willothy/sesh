@@ -94,13 +94,6 @@ async fn exec_session(
         .into_alternate_screen()
         .context("Failed to enter alternate screen")?;
 
-    let mut output = tokio::io::stdout();
-
-    // Set terminal title
-    output
-        .write_all(format!("\x1B]0;{}\x07", program).as_bytes())
-        .await?;
-
     let sock = PathBuf::from(&socket);
     let sock_dir = sock
         .parent()
@@ -126,62 +119,89 @@ async fn exec_session(
         .into_split();
 
     // Reads process output from the server and writes it to the terminal
-    let mut r_handle = tokio::task::spawn({
-        let exit = ctx.exit.0.subscribe();
+    let r_handle = tokio::task::spawn({
+        let mut exit = ctx.exit.0.subscribe();
         async move {
             let mut packet = [0; 4096];
-            while exit.is_empty() {
-                let bytes = r_stream.read(&mut packet).await?;
-                if bytes == 0 {
-                    break;
+            let mut output = tokio::io::stdout();
+            // Set terminal title
+            output
+                .write_all(format!("\x1B]0;{}\x07", program).as_bytes())
+                .await?;
+
+            loop {
+                let read = async {
+                    r_stream.readable().await?;
+                    let bytes = r_stream
+                        .read(&mut packet)
+                        .await
+                        .context("Failed to read tty_output")?;
+                    if bytes == 0 {
+                        return Ok(());
+                    }
+
+                    output
+                        .write_all(&packet[..bytes])
+                        .await
+                        .context("Could not write tty_output")?;
+                    output.flush().await.context("Could not flush tty_output")?;
+                    Result::<_, anyhow::Error>::Ok(())
+                };
+                tokio::select! {
+                    _ = exit.recv() => break,
+                    res = read => res.context("Could not write tty_output")?,
                 }
-                output
-                    .write_all(&packet[..bytes])
-                    .await
-                    .context("Could not write tty_output")?;
-                output.flush().await.context("Could not flush tty_output")?;
             }
+
             Result::<_, anyhow::Error>::Ok(())
         }
     });
 
     // Reads terminal input and sends it to the server to be handled by the process.
-    let mut w_handle = tokio::task::spawn({
+    let w_handle = tokio::task::spawn({
         let ctx = ctx.clone();
         let name = name.clone();
+        let mut exit_rx = ctx.exit.0.subscribe();
         async move {
             let mut input = tokio::io::stdin();
-            while ctx.exit.1.is_empty() {
-                let mut packet = [0; 4096];
+            let mut packet = [0; 4096];
+            loop {
+                let write = async {
+                    let nbytes = input
+                        .read(&mut packet)
+                        .await
+                        .context("Failed to read tty_input")?;
+                    if nbytes == 0 {
+                        return Err(anyhow::anyhow!("Failed to read stdin"));
+                    }
+                    let read = &packet[..nbytes];
 
-                let nbytes = input
-                    .read(&mut packet)
-                    .await
-                    .context("Failed to read tty_input")?;
-                if nbytes == 0 {
-                    break;
+                    // Alt-\
+                    // TODO: Make this configurable
+                    if nbytes >= 2 && read[0] == 27 && read[1] == 92 {
+                        detach(ctx.clone(), Some(SessionSelector::Name(name.clone()))).await?;
+                        ctx.exit.0.send(ExitKind::Detach)?;
+                        return Result::<_, anyhow::Error>::Ok(());
+                    }
+
+                    if let Err(_) = w_stream.try_write(&[]) {
+                        return Err(anyhow::anyhow!("Failed to write to socket"));
+                    }
+                    w_stream.writable().await?;
+                    w_stream.write_all(read).await?;
+                    w_stream.flush().await?;
+                    Ok(())
+                };
+                tokio::select! {
+                    _ = exit_rx.recv() => break,
+                    res = write => res.context("Could not write tty_input")?,
                 }
-                let read = &packet[..nbytes];
-
-                // Alt-\
-                // TODO: Make this configurable
-                if nbytes >= 2 && read[0] == 27 && read[1] == 92 {
-                    detach(ctx, Some(SessionSelector::Name(name))).await?;
-                    break;
-                }
-
-                w_stream
-                    .write_all(read)
-                    .await
-                    .context("Failed to write to w_stream")?;
-                w_stream.flush().await.context("Failed to flush w_stream")?;
             }
             Result::<_, anyhow::Error>::Ok(())
         }
     });
-    let w_abort_handle = w_handle.abort_handle();
 
-    tokio::task::spawn({
+    let server_handle = tokio::task::spawn({
         let (exit_tx, mut exit_rx) = (ctx.exit.0.clone(), ctx.exit.0.subscribe());
         async move {
             RPCServer::builder()
@@ -190,12 +210,11 @@ async fn exec_session(
                     exit_rx.recv().await.ok();
                 })
                 .await?;
-            w_abort_handle.abort();
             Result::<_, anyhow::Error>::Ok(())
         }
     });
 
-    tokio::task::spawn({
+    let resize_handle = tokio::task::spawn({
         let name = name.clone();
         let mut ctx = ctx.clone();
         async move {
@@ -214,7 +233,7 @@ async fn exec_session(
                         ctx.client.resize_session(SeshResizeRequest {
                             size: Some(size),
                             session: Some(sesh_resize_request::Session::Name(name.clone())),
-                        }).await.context("Failed to resize")?;
+                        }).await?;
                     }
                 }
             }
@@ -222,7 +241,8 @@ async fn exec_session(
         }
     });
 
-    let mut exit_rx = ctx.exit.1;
+    // Wait for exit signal
+    let (exit_tx, mut exit_rx) = ctx.exit;
     let mut quit = signal(SignalKind::quit())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -233,14 +253,24 @@ async fn exec_session(
         _ = interrupt.recv() => ExitKind::Quit,
         _ = terminate.recv() => ExitKind::Quit,
         _ = alarm.recv() => ExitKind::Quit,
-        _ = &mut r_handle => ExitKind::Quit,
-        _ = &mut w_handle => ExitKind::Quit,
+        // _ = &mut r_handle => ExitKind::Quit,
+        // _ = &mut w_handle => ExitKind::Quit,
     };
 
+    // Ensure the server is shutdown
+    exit_tx.send(exit.clone())?;
+
+    // Cancel the IO tasks
+    r_handle.await??;
+    w_handle.await??;
+
+    // Wait for the server to shutdown
+    server_handle.await??;
+    resize_handle.await??;
+
+    // Cleanup
     tokio::fs::remove_file(&client_server_sock).await.ok();
-    // the write handle will block if it's not aborted
-    w_handle.abort();
-    r_handle.abort();
+
     Ok(exit)
 }
 
