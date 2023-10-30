@@ -13,7 +13,6 @@ use sesh_proto::{
     sesh_cli_server::SeshCliServer, sesh_kill_request::Session, sesh_resize_request,
     SeshResizeRequest, SeshStartRequest, WinSize,
 };
-use sesh_shared::term::process_exit;
 use termion::color::{self, Fg};
 use termion::{raw::IntoRawMode, screen::IntoAlternateScreen};
 use tokio::sync::broadcast;
@@ -67,8 +66,10 @@ impl Ctx {
             exit: (tx, rx),
         })
     }
+}
 
-    fn copy(&self) -> Self {
+impl Clone for Ctx {
+    fn clone(&self) -> Self {
         Ctx {
             client: self.client.clone(),
             exit: (self.exit.0.clone(), self.exit.0.subscribe()),
@@ -100,8 +101,6 @@ async fn exec_session(
         .write_all(format!("\x1B]0;{}\x07", program).as_bytes())
         .await?;
 
-    let mut input = tokio::io::stdin();
-
     let sock = PathBuf::from(&socket);
     let sock_dir = sock
         .parent()
@@ -127,14 +126,14 @@ async fn exec_session(
         .into_split();
 
     // Reads process output from the server and writes it to the terminal
-    let r_handle = tokio::task::spawn({
+    let mut r_handle = tokio::task::spawn({
         let exit = ctx.exit.0.subscribe();
         async move {
             let mut packet = [0; 4096];
             while exit.is_empty() {
                 let bytes = r_stream.read(&mut packet).await?;
                 if bytes == 0 {
-                    continue;
+                    break;
                 }
                 output
                     .write_all(&packet[..bytes])
@@ -147,10 +146,11 @@ async fn exec_session(
     });
 
     // Reads terminal input and sends it to the server to be handled by the process.
-    let w_handle = tokio::task::spawn({
-        let ctx = ctx.copy();
+    let mut w_handle = tokio::task::spawn({
+        let ctx = ctx.clone();
         let name = name.clone();
         async move {
+            let mut input = tokio::io::stdin();
             while ctx.exit.1.is_empty() {
                 let mut packet = [0; 4096];
 
@@ -197,7 +197,7 @@ async fn exec_session(
 
     tokio::task::spawn({
         let name = name.clone();
-        let mut ctx = ctx.copy();
+        let mut ctx = ctx.clone();
         async move {
             let mut signal = signal(SignalKind::window_change())?;
             loop {
@@ -229,11 +229,12 @@ async fn exec_session(
     let mut alarm = signal(SignalKind::alarm())?;
     let exit = tokio::select! {
         kind = exit_rx.recv() => kind.unwrap_or(ExitKind::Quit),
-        _ = process_exit(pid) => ExitKind::Quit,
         _ = quit.recv() => ExitKind::Quit,
         _ = interrupt.recv() => ExitKind::Quit,
         _ = terminate.recv() => ExitKind::Quit,
         _ = alarm.recv() => ExitKind::Quit,
+        _ = &mut r_handle => ExitKind::Quit,
+        _ = &mut w_handle => ExitKind::Quit,
     };
 
     tokio::fs::remove_file(&client_server_sock).await.ok();
