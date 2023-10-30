@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/willothy/sesh/compare/v0.1.12...v0.2.0) (2023-10-30)
+
+
+### Features
+
+* SessionList with id / name lookup ([84cd7bd](https://github.com/willothy/sesh/commit/84cd7bd5a8ffcf299314dc80f32ad8415e3efb4d))
+
+
+### Performance Improvements
+
+* reduce socket check delay when spawning server ([cb22456](https://github.com/willothy/sesh/commit/cb224561bc103a35343984727ea1cda16f6b1aa9))
+
 ## [0.1.12](https://github.com/willothy/sesh/compare/v0.1.11...v0.1.12) (2023-10-27)
 
 
