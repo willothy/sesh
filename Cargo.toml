@@ -54,6 +54,7 @@ sesh-shared = { path = "./shared", version = "0.1.12" }
 sesh-proto = { path = "./proto", version = "0.1.12" }
 sesh-cli = { path = "./cli", version = "0.1.12" }
 dashmap = "5.5.3"
+termwiz = { version = "0.22.0", features = ["serde", "image", "fnv"] }
 
 [build-dependencies]
 sesh-cli = { path = "./cli", version = "0.1.12" }

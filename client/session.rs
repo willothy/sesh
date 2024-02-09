@@ -15,6 +15,10 @@ use sesh_proto::{
 };
 use termion::color::{self, Fg};
 use termion::{raw::IntoRawMode, screen::IntoAlternateScreen};
+use termwiz::caps::Capabilities;
+use termwiz::color::ColorAttribute;
+use termwiz::surface::{Change, Position};
+use termwiz::terminal::buffered::BufferedTerminal;
 use tokio::sync::broadcast;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -36,6 +40,7 @@ static BULLET_ICON: char = '❒';
 /// Initializes the Tonic client with a UnixStream from the provided socket path
 /// Sets up exit broadcast / mpmc channel
 pub struct Ctx {
+    surface: termwiz::surface::Surface,
     client: SeshdClient<Channel>,
     exit: (broadcast::Sender<ExitKind>, broadcast::Receiver<ExitKind>),
 }
@@ -61,8 +66,11 @@ impl Ctx {
 
         let (tx, rx) = broadcast::channel(1);
 
+        let (width, height) = termion::terminal_size()?;
+
         Ok(Ctx {
             client,
+            surface: termwiz::surface::Surface::new(width as usize, height as usize),
             exit: (tx, rx),
         })
     }
@@ -72,6 +80,11 @@ impl Clone for Ctx {
     fn clone(&self) -> Self {
         Ctx {
             client: self.client.clone(),
+            surface: {
+                let size = self.surface.dimensions();
+
+                termwiz::surface::Surface::new(size.0, size.1)
+            },
             exit: (self.exit.0.clone(), self.exit.0.subscribe()),
         }
     }
@@ -94,12 +107,14 @@ async fn exec_session(
         .into_alternate_screen()
         .context("Failed to enter alternate screen")?;
 
-    let mut output = tokio::io::stdout();
+    // let mut output = tokio::io::stdout();
+
+    let caps = Capabilities::new_from_env()?;
+    let terminal = termwiz::terminal::new_terminal(caps)?;
+    let mut t = BufferedTerminal::new(terminal)?;
 
     // Set terminal title
-    output
-        .write_all(format!("\x1B]0;{}\x07", program).as_bytes())
-        .await?;
+    t.add_change(Change::Title(program));
 
     let sock = PathBuf::from(&socket);
     let sock_dir = sock
@@ -129,17 +144,246 @@ async fn exec_session(
     let mut r_handle = tokio::task::spawn({
         let exit = ctx.exit.0.subscribe();
         async move {
+            let mut parser = termwiz::escape::parser::Parser::new();
             let mut packet = [0; 4096];
             while exit.is_empty() {
                 let bytes = r_stream.read(&mut packet).await?;
                 if bytes == 0 {
                     break;
                 }
-                output
-                    .write_all(&packet[..bytes])
-                    .await
-                    .context("Could not write tty_output")?;
-                output.flush().await.context("Could not flush tty_output")?;
+                parser.parse(&packet[..bytes], |seq| match seq {
+                    termwiz::escape::Action::Print(ch) => {
+                        t.add_change(Change::Text(ch.to_string()));
+                    }
+                    termwiz::escape::Action::PrintString(str) => {
+                        t.add_change(Change::Text(str.to_string()));
+                    }
+                    termwiz::escape::Action::Control(_) => {}
+                    termwiz::escape::Action::DeviceControl(_) => {}
+                    termwiz::escape::Action::OperatingSystemCommand(_) => {}
+                    termwiz::escape::Action::CSI(csi) => match csi {
+                        termwiz::escape::CSI::Sgr(_) => {
+                            // FIXME: This is not implemented yet
+                        }
+                        termwiz::escape::CSI::Cursor(c) => match c {
+                            termwiz::escape::csi::Cursor::CharacterAbsolute(pos) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Absolute(pos.as_zero_based() as usize),
+                                    y: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::CharacterPositionAbsolute(pos) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Absolute(pos.as_zero_based() as usize),
+                                    y: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::CharacterPositionBackward(pos) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Relative(-(pos as isize)),
+                                    y: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::CharacterPositionForward(pos) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Relative(pos as isize),
+                                    y: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::CharacterAndLinePosition {
+                                line,
+                                col,
+                            } => {
+                                let line = line.as_zero_based();
+                                let col = col.as_zero_based();
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Absolute(col as usize),
+                                    y: Position::Absolute(line as usize),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::LinePositionAbsolute(pos) => {
+                                t.add_change(Change::CursorPosition {
+                                    y: Position::Absolute(pos as usize),
+                                    x: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::LinePositionBackward(pos) => {
+                                t.add_change(Change::CursorPosition {
+                                    y: Position::Relative(-(pos as isize)),
+                                    x: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::LinePositionForward(pos) => {
+                                t.add_change(Change::CursorPosition {
+                                    y: Position::Relative(pos as isize),
+                                    x: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::ForwardTabulation(amount) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Relative(amount as isize),
+                                    y: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::NextLine(n) => {
+                                t.add_change(Change::CursorPosition {
+                                    y: Position::Relative(n as isize),
+                                    x: Position::Absolute(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::PrecedingLine(n) => {
+                                t.add_change(Change::CursorPosition {
+                                    y: Position::Relative(-(n as isize)),
+                                    x: Position::Absolute(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::BackwardTabulation(amount) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Relative(-(amount as isize)),
+                                    y: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::TabulationClear(_) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Absolute(0),
+                                    y: Position::Absolute(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::ActivePositionReport { .. } => {
+                                let pos = t.cursor_position();
+                                let pos = format!("\x1b[{};{}R", pos.1 + 1, pos.0 + 1);
+                                t.add_change(Change::Text(pos));
+                            }
+                            termwiz::escape::csi::Cursor::RequestActivePositionReport => {
+                                // FIXME: This is not implemented yet
+                            }
+                            termwiz::escape::csi::Cursor::SaveCursor => {
+                                // FIXME: This is not implemented yet
+                            }
+                            termwiz::escape::csi::Cursor::RestoreCursor => {
+                                // FIXME: This is not implemented yet
+                            }
+                            termwiz::escape::csi::Cursor::TabulationControl(_) => {
+                                // FIXME: This is not implemented yet
+                            }
+                            termwiz::escape::csi::Cursor::Left(amount) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Relative(-(amount as isize)),
+                                    y: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::Down(amount) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Relative(0),
+                                    y: Position::Relative(amount as isize),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::Right(amount) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Relative(amount as isize),
+                                    y: Position::Relative(0),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::Up(amount) => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Relative(0),
+                                    y: Position::Relative(-(amount as isize)),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::Position { line, col } => {
+                                t.add_change(Change::CursorPosition {
+                                    x: Position::Absolute(col.as_zero_based() as usize),
+                                    y: Position::Absolute(line.as_zero_based() as usize),
+                                });
+                            }
+                            termwiz::escape::csi::Cursor::LineTabulation(_) => {
+                                // FIXME: This is not implemented yet
+                            }
+                            termwiz::escape::csi::Cursor::SetTopAndBottomMargins { .. } => {
+                                // FIXME: This is not implemented yet
+                            }
+                            termwiz::escape::csi::Cursor::SetLeftAndRightMargins { .. } => {
+                                // FIXME: This is not implemented yet
+                            }
+                            termwiz::escape::csi::Cursor::CursorStyle(style) => {
+                                use termwiz::escape::csi::CursorStyle;
+                                use termwiz::surface::CursorShape;
+                                t.add_change(Change::CursorShape(match style {
+                                    CursorStyle::Default => CursorShape::Default,
+                                    CursorStyle::BlinkingBlock => CursorShape::BlinkingBlock,
+                                    CursorStyle::SteadyBlock => CursorShape::SteadyBlock,
+                                    CursorStyle::BlinkingUnderline => {
+                                        CursorShape::BlinkingUnderline
+                                    }
+                                    CursorStyle::SteadyUnderline => CursorShape::SteadyUnderline,
+                                    CursorStyle::BlinkingBar => CursorShape::BlinkingBar,
+                                    CursorStyle::SteadyBar => CursorShape::SteadyBar,
+                                }));
+                            }
+                        },
+                        termwiz::escape::CSI::Edit(edit) => match edit {
+                            termwiz::escape::csi::Edit::DeleteCharacter(pos) => {
+                                // t.add_changes(Change::Cl)
+                            }
+                            termwiz::escape::csi::Edit::DeleteLine(_) => todo!(),
+                            termwiz::escape::csi::Edit::EraseCharacter(_) => todo!(),
+                            termwiz::escape::csi::Edit::EraseInLine(e) => match e {
+                                termwiz::escape::csi::EraseInLine::EraseToEndOfLine => {
+                                    t.add_change(Change::ClearToEndOfLine(ColorAttribute::Default));
+                                }
+                                termwiz::escape::csi::EraseInLine::EraseToStartOfLine => {
+                                    t.add_change(Change::ClearToEndOfLine(ColorAttribute::Default));
+                                }
+                                termwiz::escape::csi::EraseInLine::EraseLine => todo!(),
+                            },
+                            termwiz::escape::csi::Edit::InsertCharacter(_) => todo!(),
+                            termwiz::escape::csi::Edit::InsertLine(_) => todo!(),
+                            termwiz::escape::csi::Edit::ScrollDown(_) => todo!(),
+                            termwiz::escape::csi::Edit::ScrollUp(_) => todo!(),
+                            termwiz::escape::csi::Edit::EraseInDisplay(_) => todo!(),
+                            termwiz::escape::csi::Edit::Repeat(_) => todo!(),
+                        },
+                        termwiz::escape::CSI::Mode(_) => {
+                            // FIXME: This is not implemented yet
+                        }
+                        termwiz::escape::CSI::Device(_) => {
+                            // FIXME: This is not implemented yet
+                        }
+                        termwiz::escape::CSI::Mouse(_) => {
+                            // FIXME: This is not implemented yet
+                        }
+                        termwiz::escape::CSI::Window(_) => {
+                            // FIXME: This is not implemented yet
+                        }
+                        termwiz::escape::CSI::Keyboard(_) => {
+                            // FIXME: This is not implemented yet
+                        }
+                        termwiz::escape::CSI::SelectCharacterPath(_, _) => {
+                            // FIXME: This is not implemented yet
+                        }
+                        termwiz::escape::CSI::Unspecified(_) => {
+                            // FIXME: This is not implemented yet
+                        }
+                    },
+                    termwiz::escape::Action::Esc(_) => {
+                        // FIXME: This is not implemented yet
+                    }
+                    termwiz::escape::Action::Sixel(_) => {
+                        // FIXME: This is not implemented yet
+                    }
+                    termwiz::escape::Action::XtGetTcap(_) => {
+                        // FIXME: This is not implemented yet
+                    }
+                    termwiz::escape::Action::KittyImage(_) => {
+                        // FIXME: This is not implemented yet
+                    }
+                });
+                // output
+                //     .write_all(&packet[..bytes])
+                //     .await
+                //     .context("Could not write tty_output")?;
+                // output.flush().await.context("Could not flush tty_output")?;
+                t.flush()?;
             }
             Result::<_, anyhow::Error>::Ok(())
         }
